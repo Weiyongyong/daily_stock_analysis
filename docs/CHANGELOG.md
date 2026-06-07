@@ -9,54 +9,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-- [修复] Web 英文界面补齐回测、组合风险与告警规则相关文案本地化，避免英文模式下残留中文筛选器、按钮和枚举标签。
-- [chore] 移除随 issue / PR 验收流程误入库的截图资产，并明确一次性截图证据应保留在 PR 描述、评论、附件或 artifact 中，不作为仓库文件合入。
-- [修复] 综合情报搜索中的机构分析与业绩预期维度改用 180 天 provider 请求窗口，避免默认短新闻窗口漏掉财报、研报等周期性财经材料。
-- [改进] 多股通知报告将市场阶段收敛为总览下方单行 `市场状态`，不再在每只股票摘要下重复展示数据质量和限制详情。
-- [修复] Web 个股栏和历史卡片在窄布局下不再让市场阶段标签遮挡股票名称。
-- [修复] 问股自由文本追问不再将 TTM、PE、YOY 等金融缩写误识别为新股票代码。
-- [修复] GitHub Actions 每日分析工作流读取 SearXNG 自建实例地址时支持 Variables 优先、Secrets 回退，修复仅配置 Variables 时 URL 不生效的问题。
-- [改进] Web 首页侧栏不再单独展示大盘复盘历史集合，最新大盘复盘作为 `MARKET` 并入个股栏，按最近分析时间参与排序，并复用个股栏的选择、删除、完整报告与历史趋势查看能力。
-- [修复] Web/桌面端左侧导航选中态改用 border 实现，避免蓝色竖条指示器溢出侧栏边界；侧栏展开宽度 116px → 136px，新增 rail 紧凑模式。
-- [修复] Windows 桌面端自动更新安装目录不再预先加引号，避免带空格路径在自动安装时触发“缺少快捷方式 / 找不到 Daily Stock Analysis.exe”的系统弹窗。
-- [修复] Agent 分析路径生成 AnalysisContextPack overview 前复用已落库日线分析上下文，避免日线已抓取成功仍显示 `daily_bars_missing`。
-- [新功能] Web 大盘复盘报告新增专用展示视图，历史入口和首页即时结果统一使用 Markdown/GFM 渲染并隐藏个股专属模块。
-- [新功能] 大盘复盘新增结构化 `market_review_payload`，Web、历史详情和推送统一基于结构化数据渲染，并保留 Markdown 兼容展示。
-- [文档] Issue #777 PR 落地说明已与实现对齐：语言切换采用仓内 `UiLanguageContext` + `uiText` 实现（未引入 `react-i18next` / `i18next`），持久化 key 为 `dsa.uiLanguage`；UI 语言与 `report_language` 解耦，仅影响文案展示，不改写报告语言链路。
-- [文档] 本次 UI 改动新增可视化验收指引，要求 PR 附上 `smoke-login-page-zh`、`smoke-home-page-zh`、`smoke-home-page-en`、`smoke-settings-page-zh`、`smoke-settings-page-en`、`smoke-mobile-shell-nav` 截图；若环境不可拍摄，请在 PR 说明补充替代可视证据路径和原因。
-- [文档] Issue #777 相关回归范围说明：`LITELLM_MODEL`、`OPENAI_BASE_URL`、`OPENAI_VISION_MODEL` 测试覆盖用于防止配置保存误清空；未发生 provider/model/base_url 运行时默认值、迁移或清理语义变更。
-- [测试] 本轮 Web 方向验证执行：`cd apps/dsa-web && npm run lint`、`cd apps/dsa-web && npm run build`、`cd apps/dsa-web && npm run test -- src/App.test.tsx src/contexts/__tests__/UiLanguageContext.test.tsx src/hooks/__tests__/useSystemConfig.test.tsx`、`cd apps/dsa-web && npm run test:smoke -- e2e/smoke.spec.ts e2e/report-markdown.spec.ts`（命令已执行，含 `web-gate: success`；`e2e/smoke.spec.ts` 与 `e2e/report-markdown.spec.ts` 共 12 条用例，全部 skip，原因是未设置 `DSA_WEB_SMOKE_PASSWORD`；其中 `language switch updates UI copy and persists after page refresh` 用例用于语言切换验收）。
-- [文档] 本次迭代仅重构大盘复盘展示链路（统一 Markdown/GFM 渲染与结构化 payload 渲染），不涉及 `LITELLM_*`、`LLM_*`、`provider/model/base_url` 等运行时配置语义；如需回退采用常规发布回滚。
-- [修复] 修正大盘复盘结构化 `breadth` 的可用性判断：当市场不支持/抓取失败（如美股、港股或 A 股 breadth 不可用）时不下发 `breadth`，前端展示“暂无数据”，避免误导性 0 值。
-- [修复] 明确大盘复盘语言行为调整为遵循全局 `report_language`，并在回退场景保持原语种提示（如美股/港股默认会按配置语言展示）；兼容性变化说明见该条款，无需额外改动 provider/model/base_url。
-- [修复] 美股中文场景下，市场标签与策略蓝图（`Strategy Blueprint/Strategy Framework`）已本地化为中文显示，避免 `report_language=zh` 下混入英文策略段落与市场标签；与 Issue #1555 的历史/即时结果一致。
-- [改进] Web/API 大盘复盘人工触发入口不再因交易日检查或相关市场休市而短路跳过；定时任务、GitHub Actions 手动运行和 CLI 默认入口仍保持原交易日 gate。
-- [改进] AlphaSift Web 选股改为后台任务提交与状态轮询，新增可恢复任务状态展示，避免外部快照/行情/LLM 变慢时浏览器长请求超时或切页后丢失反馈。
-- [修复] Docker Web 设置页读取配置时在活跃 `.env` 文件缺项时回退展示启动注入的同名环境变量，并补清 `env_file` / `--env-file`、`ENV_FILE=/app/data/runtime.env` 与单文件 `.env` 挂载边界文档。
-- [文档] 补充说明：LLM / LiteLLM 兼容键的回退仅用于 Settings 界面展示与校验上下文拼装，不改写、不迁移、不清理用户现有的 provider/model/base URL 持久化配置；未发生 provider / model / base URL 语义迁移，仅保留同名启动注入的展示级兜底。兼容边界依据 `requirements.txt`（`litellm>=1.80.10,!=1.82.7,!=1.82.8,<2.0.0`、`openai>=1.0.0`）；官方语义来源：[LiteLLM OpenAI-compatible](https://docs.litellm.ai/docs/providers/openai_compatible)、[OpenAI Chat Completion API](https://platform.openai.com/docs/api-reference/chat/create)。回退/恢复路径为：重启/更新后清理同名 `env_file` / `--env-file` / `environment` 覆盖后使用持久化保存值，或通过桌面端导入/导出 `.env` 片段恢复；仅在 WebUI 未改写同名启动注入值时才会按该片段接管。验证回归点见 `tests/test_system_config_service.py::test_get_config_uses_runtime_env_as_display_fallback`、`tests/test_system_config_service.py::test_get_config_runtime_env_fallback_does_not_persist_llm_fields_on_save`、`tests/test_system_config_service.py::test_runtime_env_fallback_does_not_override_saved_provider_and_base_url_settings`、以及 `tests/test_system_config_api.py` 的 `/api/v1/system/config` 获取/保存链路回归。
-- [修复] 报告页运行诊断会区分数据源抓取成功与进入 LLM 分析输入，相关新闻区标注为报告页补充/后续检索资讯，避免与输入数据块状态互相误读。
-- [文档] #1602 修复覆盖 9 个文件：`apps/dsa-web/src/components/report/AnalysisContextSummary.tsx`、`apps/dsa-web/src/components/report/ReportDiagnostics.tsx`、`apps/dsa-web/src/components/report/ReportNews.tsx`、`apps/dsa-web/src/components/report/__tests__/AnalysisContextSummary.test.tsx`、`apps/dsa-web/src/components/report/__tests__/ReportDiagnostics.test.tsx`、`apps/dsa-web/src/components/report/__tests__/ReportNews.test.tsx`、`src/services/run_diagnostics.py`、`tests/test_run_diagnostics_p2.py`、`docs/CHANGELOG.md`，仅做输入与展示口径统一，未改写/迁移/清理 `provider`、`model`、`base_url` 等持久化运行时配置，回滚方式为常规发布回滚（revert）。
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
-- [修复] `/health` 根路径健康检查现在始终返回 JSON，避免静态 Web fallback 吞掉健康探针；`/api/health` 与 `/api/v1/health` 继续保持兼容。
-- [改进] API 错误响应构造收敛到共享 helper，保持既有错误 envelope 形状并降低 endpoint 重复代码。
-- [改进] WebUI 绑定公网地址或 CORS 全开放且未启用管理员认证时新增运行时 warning；仅增加可观测性，不阻断启动、不改写配置。
-- [改进] 数据库初始化新增 `schema_migrations` baseline 标记表与幂等记录，用于后续 schema 演进追踪；不迁移、不清理、不改写既有业务表数据。
-- [测试] Web 测试运行时声明 Node `>=20.19.0 <27` 与 npm `>=10`，并补 localStorage 测试兜底以稳定 Vitest。
-- [改进] #1386 P6 复用市场阶段与 AnalysisContextPack 公开摘要联动告警、持仓手动分析、历史、回测和通知展示，不新增数据库迁移。
-- [新功能] WebUI 新增独立界面语言状态与中英文切换入口，覆盖主导航、首页、登录、设置页和通用控件文案；不复用或改变报告语言配置语义。
 
-- [新功能] 飞书通知新增应用机器人（App Bot）模式，支持通过 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_CHAT_ID 配置，无需额外创建自定义机器人。
-- [文档] 明确 AnalysisContextPack P6 文档、迁移与回滚边界，并同步既有 `SAVE_CONTEXT_SNAPSHOT` 到 `.env.example`、配置注册表、Web 设置帮助和完整指南。
-- [文档] 补齐 #1386 P7 盘前/盘中/盘后分析的入口、迁移、回滚和用户可见说明。
-- [新功能] 新增默认关闭的 AlphaSift 选股页签，通过 `ALPHASIFT_ENABLED` 明确控制，并保留 `/install` 作为显式修复路径。
-- [改进] AlphaSift 选股 API 与服务层收敛到 `AlphaSiftService`，endpoint 仅做路由参数接收与错误映射。
-- [改进] AlphaSift 与 DSA 的运行时 LLM 兼容桥接改为调用期注入，保留 `provider/model/base_url/custom headers/fallback` 语义链路，不做持久化迁移。
-- [修复] `ALPHASIFT_ENABLED` 关闭时不触发 `alphasift` 运行时注入；开启后优先复用已配置的 DSA/provider 配置并注入 `LITELLM_*` 与 `LLM_*` 运行时变量。
-- [修复] 补齐 openai-compatible 场景下 base URL、`extra_headers` 与 `LITELLM_FALLBACK_MODELS` 的兼容路径与回退链验证。
-- [文档] 为 AlphaSift runtime bridge 增加官方兼容依据落点：补充 `docs/alphasift-integration.md` 中 LiteLLM/OpenAI 官方文档锚点与 `requirements.txt`/`alphasift` commit 版本依据，明确 provider/model/base_url/extra_headers/fallback 与回退边界。
-- [修复] 桌面/镜像打包链路保持与运行时一致的 AlphaSift 适配层预置，避免 `pip install` 作为线上修复依赖。
-- [测试] 增补 AlphaSift runtime bridge 与打包脚本静态验证，覆盖 `LLM_CHANNELS`、`LITELLM_FALLBACK_MODELS`、`alphasift.dsa_adapter`、`--collect-all alphasift`。
+## [3.21.0] - 2026-06-07
+
+### 发布亮点
+
+- feat: 新增 Web UI 中英文界面语言切换和飞书 App Bot 通知模式，提升多人部署和企业通知场景体验。
+- feat: 大盘复盘报告、历史入口和个股栏继续收口到结构化数据与统一 Markdown/GFM 渲染，Web/API 人工触发入口不再被交易日 gate 短路。
+- feat: AlphaSift 选股链路改为可恢复后台任务，并完善 DSA LLM runtime bridge、默认适配层预置和兼容回归。
+- fix: 修复英文界面残留中文、诊断展示、运行时环境变量展示、健康检查、桌面更新路径、工作流变量读取和多处 Web 窄布局问题。
+
+### 新功能
+
+- WebUI 新增独立界面语言状态与中英文切换入口，覆盖主导航、首页、登录、设置页和通用控件文案；UI 语言与 `report_language` 解耦，不改写报告语言链路。
+- 飞书通知新增应用机器人（App Bot）模式，支持通过 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_CHAT_ID` 配置，无需额外创建自定义机器人。
+- Web 大盘复盘报告新增专用展示视图，历史入口和首页即时结果统一使用 Markdown/GFM 渲染并隐藏个股专属模块。
+- 大盘复盘新增结构化 `market_review_payload`，Web、历史详情和推送统一基于结构化数据渲染，并保留 Markdown 兼容展示。
+- 新增默认关闭的 AlphaSift 选股页签，通过 `ALPHASIFT_ENABLED` 明确控制，并保留 `/install` 作为显式修复路径。
+
+### 改进
+
+- Web/API 大盘复盘人工触发入口不再因交易日检查或相关市场休市而短路跳过；定时任务、GitHub Actions 手动运行和 CLI 默认入口仍保持原交易日 gate。
+- AlphaSift Web 选股改为后台任务提交与状态轮询，新增可恢复任务状态展示，避免外部快照、行情或 LLM 变慢时浏览器长请求超时。
+- AlphaSift 选股 API 与服务层收敛到 `AlphaSiftService`，endpoint 仅做路由参数接收与错误映射。
+- AlphaSift 与 DSA 的运行时 LLM 兼容桥接改为调用期注入，保留 `provider/model/base_url/custom headers/fallback` 语义链路，不做持久化迁移。
+- Web 首页侧栏不再单独展示大盘复盘历史集合，最新大盘复盘作为 `MARKET` 并入个股栏，按最近分析时间参与排序，并复用个股栏的选择、删除、完整报告与历史趋势查看能力。
+- 多股通知报告将市场阶段收敛为总览下方单行 `市场状态`，不再在每只股票摘要下重复展示数据质量和限制详情。
+- API 错误响应构造收敛到共享 helper，保持既有错误 envelope 形状并降低 endpoint 重复代码。
+- WebUI 绑定公网地址或 CORS 全开放且未启用管理员认证时新增运行时 warning；仅增加可观测性，不阻断启动、不改写配置。
+- 数据库初始化新增 `schema_migrations` baseline 标记表与幂等记录，用于后续 schema 演进追踪；不迁移、不清理、不改写既有业务表数据。
+- #1386 P6 复用市场阶段与 AnalysisContextPack 公开摘要联动告警、持仓手动分析、历史、回测和通知展示，不新增数据库迁移。
+
+### 修复
+
+- Web 英文界面补齐回测、组合风险与告警规则相关文案本地化，避免英文模式下残留中文筛选器、按钮和枚举标签。
+- 综合情报搜索中的机构分析与业绩预期维度改用 180 天 provider 请求窗口，避免默认短新闻窗口漏掉财报、研报等周期性财经材料。
+- Web 个股栏和历史卡片在窄布局下不再让市场阶段标签遮挡股票名称。
+- 问股自由文本追问不再将 TTM、PE、YOY 等金融缩写误识别为新股票代码。
+- [修复] GitHub Actions 每日分析工作流读取 SearXNG 自建实例地址时支持 Variables 优先、Secrets 回退，修复仅配置 Variables 时 URL 不生效的问题。
+- Web/桌面端左侧导航选中态改用 border 实现，避免蓝色竖条指示器溢出侧栏边界；侧栏展开宽度 116px -> 136px，新增 rail 紧凑模式。
+- Windows 桌面端自动更新安装目录不再预先加引号，避免带空格路径在自动安装时触发“缺少快捷方式 / 找不到 Daily Stock Analysis.exe”的系统弹窗。
+- Agent 分析路径生成 AnalysisContextPack overview 前复用已落库日线分析上下文，避免日线已抓取成功仍显示 `daily_bars_missing`。
+- 修正大盘复盘结构化 `breadth` 的可用性判断：当市场不支持或抓取失败时不下发 `breadth`，前端展示“暂无数据”，避免误导性 0 值。
+- 大盘复盘语言行为遵循全局 `report_language`，并在美股中文场景下本地化市场标签与策略蓝图，避免混入英文策略段落。
+- Docker Web 设置页读取配置时在活跃 `.env` 文件缺项时回退展示启动注入的同名环境变量，并补清相关挂载边界文档。
+- 报告页运行诊断会区分数据源抓取成功与进入 LLM 分析输入，相关新闻区标注为报告页补充/后续检索资讯，避免与输入数据块状态互相误读。
+- `/health` 根路径健康检查现在始终返回 JSON，避免静态 Web fallback 吞掉健康探针；`/api/health` 与 `/api/v1/health` 继续保持兼容。
+- `ALPHASIFT_ENABLED` 关闭时不触发 `alphasift` 运行时注入；开启后优先复用已配置的 DSA/provider 配置并注入 `LITELLM_*` 与 `LLM_*` 运行时变量。
+- 补齐 openai-compatible 场景下 base URL、`extra_headers` 与 `LITELLM_FALLBACK_MODELS` 的兼容路径与回退链验证。
+- 桌面/镜像打包链路保持与运行时一致的 AlphaSift 适配层预置，避免 `pip install` 作为线上修复依赖。
+
+### 文档
+
+- 明确 Issue #777 UI 语言切换采用仓内 `UiLanguageContext` + `uiText` 实现，持久化 key 为 `dsa.uiLanguage`，并补充对应可视化验收指引。
+- 明确大盘复盘展示链路、结构化 payload、语言行为、交易日 gate 差异和回滚边界。
+- 补充 LLM / LiteLLM 兼容键在 Settings 展示与校验上下文中的回退边界，说明不改写、不迁移、不清理用户现有 provider/model/base URL 持久化配置。
+- 补齐 #1602 运行诊断口径修复覆盖范围，说明仅统一输入与展示口径，回滚方式为常规发布回滚。
+- 明确 AnalysisContextPack P6 文档、迁移与回滚边界，并同步既有 `SAVE_CONTEXT_SNAPSHOT` 到 `.env.example`、配置注册表、Web 设置帮助和完整指南。
+- 补齐 #1386 P7 盘前/盘中/盘后分析的入口、迁移、回滚和用户可见说明。
+- 为 AlphaSift runtime bridge 增加官方兼容依据落点，明确 provider/model/base_url/extra_headers/fallback 与回退边界。
+
+### 测试
+
+- Web 方向执行 `npm run lint`、`npm run build`、相关 Vitest 和 smoke 命令；未设置 `DSA_WEB_SMOKE_PASSWORD` 时 smoke 用例按设计 skip。
+- Web 测试运行时声明 Node `>=20.19.0 <27` 与 npm `>=10`，并补 localStorage 测试兜底以稳定 Vitest。
+- 增补 AlphaSift runtime bridge 与打包脚本静态验证，覆盖 `LLM_CHANNELS`、`LITELLM_FALLBACK_MODELS`、`alphasift.dsa_adapter`、`--collect-all alphasift`。
+
+### chore
+
+- 移除随 issue / PR 验收流程误入库的截图资产，并明确一次性截图证据应保留在 PR 描述、评论、附件或 artifact 中，不作为仓库文件合入。
 
 ## [3.20.0] - 2026-06-03
 
@@ -1690,7 +1713,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
-[Unreleased]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.20.0...HEAD
+[Unreleased]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.21.0...HEAD
+[3.21.0]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.20.0...v3.21.0
 [3.20.0]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.19.0...v3.20.0
 [3.19.0]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.18.0...v3.19.0
 [3.18.0]: https://github.com/ZhuLinsen/daily_stock_analysis/compare/v3.17.1...v3.18.0
