@@ -51,6 +51,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+           pip install akshare  # 自动选股行情库
       
       - name: 创建必要目录
         run: |
@@ -460,6 +461,9 @@ jobs:
             FORCE_RUN_ARG="--force-run"
             echo "⚡ 已启用强制运行模式（跳过交易日检查）"
           fi
+
+          - name: 执行全市场自动筛选
+            run: python auto_screen.py
 
           # 执行分析
           if [ "$MODE" = "market-only" ]; then
