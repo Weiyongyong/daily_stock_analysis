@@ -462,8 +462,8 @@ jobs:
             echo "⚡ 已启用强制运行模式（跳过交易日检查）"
           fi
 
-          - name: 执行全市场自动筛选
-            run: python auto_screen.py
+          # 执行全市场自动筛选
+            python auto_screen.py
 
           # 执行分析
           if [ "$MODE" = "market-only" ]; then
