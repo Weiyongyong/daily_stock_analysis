@@ -21,6 +21,15 @@ A股自选股智能分析系统 - 主调度程序
 - 效率优先：关注筹码集中度好的股票
 - 买点偏好：缩量回踩 MA5/MA10 支撑
 """
+# 新增：读取自动选股脚本生成的股票池
+import os
+if os.path.exists(".auto_stock_env"):
+    with open(".auto_stock_env", "r", encoding="utf-8") as f:
+        line = f.read().strip()
+        if line.startswith("STOCK_LIST="):
+            os.environ["STOCK_LIST"] = line.split("=", 1)[1]
+
+# 下面保留main.py原有全部代码，无需改动
 from __future__ import annotations
 
 import multiprocessing
