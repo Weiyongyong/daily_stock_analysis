@@ -56,34 +56,34 @@ jobs:
         run: |
           mkdir -p data logs reports
 
-      - name: 自动选股（筛选今日候选股池）
-        env:
-          AUTO_SCREEN_ENABLED: ${{ vars.AUTO_SCREEN_ENABLED || 'true' }}
-          AUTO_SCREEN_MAX: ${{ vars.AUTO_SCREEN_MAX || '5' }}
-          AUTO_SCREEN_USE_HISTORY: ${{ vars.AUTO_SCREEN_USE_HISTORY || 'false' }}
-        run: |
-          if [ "${AUTO_SCREEN_ENABLED}" = "true" ]; then
-            echo "🔍 自动选股已启用，开始筛选..."
-            USE_HIST_ARG=""
-            if [ "${AUTO_SCREEN_USE_HISTORY}" = "true" ]; then
-              USE_HIST_ARG="--use-history"
-            fi
-            python auto_screen.py --max "${AUTO_SCREEN_MAX}" $USE_HIST_ARG || echo "⚠️ 自动选股执行失败，将使用默认 STOCK_LIST"
-            # 读取 .auto_stock_env 并导出为环境变量供后续步骤使用
-            if [ -f ".auto_stock_env" ]; then
-              SCREENED_STOCKS=$(grep '^STOCK_LIST=' .auto_stock_env | cut -d'=' -f2-)
-              if [ -n "$SCREENED_STOCKS" ]; then
-                echo "STOCK_LIST=$SCREENED_STOCKS" >> $GITHUB_ENV
-                echo "📋 自动选股结果: $SCREENED_STOCKS"
-              else
-                echo "⚪ 选股结果为空，使用默认 STOCK_LIST 配置"
-              fi
-            else
-              echo "⚪ 未生成选股文件，使用默认 STOCK_LIST 配置"
-            fi
-          else
-            echo "⚪ 自动选股未启用（设置 AUTO_SCREEN_ENABLED=true 开启），使用 STOCK_LIST 配置"
-          fi
+      # - name: 自动选股（筛选今日候选股池）
+      #   env:
+      #     AUTO_SCREEN_ENABLED: ${{ vars.AUTO_SCREEN_ENABLED || 'true' }}
+      #     AUTO_SCREEN_MAX: ${{ vars.AUTO_SCREEN_MAX || '5' }}
+      #     AUTO_SCREEN_USE_HISTORY: ${{ vars.AUTO_SCREEN_USE_HISTORY || 'false' }}
+      #   run: |
+      #     if [ "${AUTO_SCREEN_ENABLED}" = "true" ]; then
+      #       echo "🔍 自动选股已启用，开始筛选..."
+      #       USE_HIST_ARG=""
+      #       if [ "${AUTO_SCREEN_USE_HISTORY}" = "true" ]; then
+      #         USE_HIST_ARG="--use-history"
+      #       fi
+      #       python auto_screen.py --max "${AUTO_SCREEN_MAX}" $USE_HIST_ARG || echo "⚠️ 自动选股执行失败，将使用默认 STOCK_LIST"
+      #       # 读取 .auto_stock_env 并导出为环境变量供后续步骤使用
+      #       if [ -f ".auto_stock_env" ]; then
+      #         SCREENED_STOCKS=$(grep '^STOCK_LIST=' .auto_stock_env | cut -d'=' -f2-)
+      #         if [ -n "$SCREENED_STOCKS" ]; then
+      #           echo "STOCK_LIST=$SCREENED_STOCKS" >> $GITHUB_ENV
+      #           echo "📋 自动选股结果: $SCREENED_STOCKS"
+      #         else
+      #           echo "⚪ 选股结果为空，使用默认 STOCK_LIST 配置"
+      #         fi
+      #       else
+      #         echo "⚪ 未生成选股文件，使用默认 STOCK_LIST 配置"
+      #       fi
+      #     else
+      #       echo "⚪ 自动选股未启用（设置 AUTO_SCREEN_ENABLED=true 开启），使用 STOCK_LIST 配置"
+      #     fi
       
       - name: 执行股票分析
         env:
