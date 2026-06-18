@@ -1,234 +1,529 @@
-# -*- coding: utf-8 -*-
-"""
-自动选股模块
+name: 每日股票分析
 
-通过 AkShare 拉取全 A 股实时行情，并结合历史 K 线计算均线，
-按"均线多头排列 + 放量上涨 + 涨跌幅温和"策略筛选候选股。
+on:
+  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  schedule:
+    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+  
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full          # 完整分析（股票+大盘）
+          - market-only   # 仅大盘复盘
+          - stocks-only   # 仅股票分析
+      force_run:
+        description: '强制运行（跳过交易日检查）'
+        required: false
+        default: false
+        type: boolean
 
-用法:
-    python auto_screen.py            # 筛选并打印结果，同时写入 .auto_stock_env
-    python auto_screen.py --max 5     # 最多筛选 5 只
+# 并发控制：同一时间只运行一个分析任务
+concurrency:
+  group: stock-analysis
+  cancel-in-progress: false
 
-在 GitHub Actions 中，本脚本在 main.py 之前运行，筛选结果通过
-环境变量 STOCK_LIST 直接传递给 main.py（同时写入 .auto_stock_env 供本地使用）。
-"""
-from __future__ import annotations
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    # 添加超时限制，防止任务卡死
+    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '30') }}
+    
+    steps:
+      - name: 随机延迟（避免固定时间访问）
+        run: sleep $((RANDOM % 60))  # 随机延迟0-60秒启动
+      
+      - name: 检出代码
+        uses: actions/checkout@v5
+      
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt  # efinance 已包含在 requirements.txt 中
+      
+      - name: 创建必要目录
+        run: |
+          mkdir -p data logs reports
 
-import argparse
-import logging
-import os
-import sys
-from typing import List, Optional
+      - name: 自动选股（筛选今日候选股池）
+        env:
+          AUTO_SCREEN_ENABLED: ${{ vars.AUTO_SCREEN_ENABLED || 'true' }}
+          AUTO_SCREEN_MAX: ${{ vars.AUTO_SCREEN_MAX || '10' }}
+          AUTO_SCREEN_USE_HISTORY: ${{ vars.AUTO_SCREEN_USE_HISTORY || 'true' }}
+        run: |
+          if [ "${AUTO_SCREEN_ENABLED}" = "true" ]; then
+            echo "🔍 自动选股已启用，开始筛选..."
+            USE_HIST_ARG=""
+            if [ "${AUTO_SCREEN_USE_HISTORY}" = "true" ]; then
+              USE_HIST_ARG="--use-history"
+            fi
+            python auto_screen.py --max "${AUTO_SCREEN_MAX}" $USE_HIST_ARG || echo "⚠️ 自动选股执行失败，将使用默认 STOCK_LIST"
+            # 读取 .auto_stock_env 并导出为环境变量供后续步骤使用
+            if [ -f ".auto_stock_env" ]; then
+              SCREENED_STOCKS=$(grep '^STOCK_LIST=' .auto_stock_env | cut -d'=' -f2-)
+              if [ -n "$SCREENED_STOCKS" ]; then
+                echo "STOCK_LIST=$SCREENED_STOCKS" >> $GITHUB_ENV
+                echo "📋 自动选股结果: $SCREENED_STOCKS"
+              else
+                echo "⚪ 选股结果为空，使用默认 STOCK_LIST 配置"
+              fi
+            else
+              echo "⚪ 未生成选股文件，使用默认 STOCK_LIST 配置"
+            fi
+          else
+            echo "⚪ 自动选股未启用（设置 AUTO_SCREEN_ENABLED=true 开启），使用 STOCK_LIST 配置"
+          fi
+      
+      - name: 执行股票分析
+        env:
+          # ==========================================
+          # AI 配置
+          # ==========================================
+          # LITELLM_CONFIG
+          LITELLM_CONFIG: ${{ vars.LITELLM_CONFIG || secrets.LITELLM_CONFIG }}
+          LITELLM_CONFIG_YAML: ${{ vars.LITELLM_CONFIG_YAML || secrets.LITELLM_CONFIG_YAML }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
+          LITELLM_FALLBACK_MODELS: ${{ vars.LITELLM_FALLBACK_MODELS || secrets.LITELLM_FALLBACK_MODELS }}
+          AGENT_LITELLM_MODEL: ${{ vars.AGENT_LITELLM_MODEL || secrets.AGENT_LITELLM_MODEL }}
+          VISION_MODEL: ${{ vars.VISION_MODEL || secrets.VISION_MODEL }}
+          OPENAI_VISION_MODEL: ${{ vars.OPENAI_VISION_MODEL || secrets.OPENAI_VISION_MODEL }}
+          VISION_PROVIDER_PRIORITY: ${{ vars.VISION_PROVIDER_PRIORITY || secrets.VISION_PROVIDER_PRIORITY }}
+          LLM_TEMPERATURE: ${{ vars.LLM_TEMPERATURE || secrets.LLM_TEMPERATURE }}
+          LLM_CHANNELS: ${{ vars.LLM_CHANNELS || secrets.LLM_CHANNELS }}
 
-logger = logging.getLogger("auto_screen")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+          # Gemini AI（主选）
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
+          GEMINI_REQUEST_DELAY: '3.0'
+          
+          # AIHubMix（优先于 OPENAI_API_KEY，自动适配 base_url，推荐国内用户）
+          AIHUBMIX_KEY: ${{ secrets.AIHUBMIX_KEY }}
 
+          # OpenAI 兼容 API（备选）
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEYS: ${{ secrets.OPENAI_API_KEYS }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL }}
 
-def _compute_ma(df, col: str, window: int) -> "pd.Series":
-    """在 DataFrame 上计算指定列的简单移动平均。"""
-    return df[col].rolling(window=window, min_periods=1).mean()
+          # DeepSeek
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_API_KEYS: ${{ secrets.DEEPSEEK_API_KEYS }}
+          
+          # Anthropic / Claude
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEYS: ${{ secrets.ANTHROPIC_API_KEYS }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || secrets.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022' }}
 
+          # LLM 渠道模式（常见渠道名需显式映射，GitHub Actions 不会自动导入任意 Secret/Variable）
+          LLM_PRIMARY_PROTOCOL: ${{ vars.LLM_PRIMARY_PROTOCOL || secrets.LLM_PRIMARY_PROTOCOL }}
+          LLM_PRIMARY_BASE_URL: ${{ vars.LLM_PRIMARY_BASE_URL || secrets.LLM_PRIMARY_BASE_URL }}
+          LLM_PRIMARY_API_KEY: ${{ secrets.LLM_PRIMARY_API_KEY }}
+          LLM_PRIMARY_API_KEYS: ${{ secrets.LLM_PRIMARY_API_KEYS }}
+          LLM_PRIMARY_MODELS: ${{ vars.LLM_PRIMARY_MODELS || secrets.LLM_PRIMARY_MODELS }}
+          LLM_PRIMARY_ENABLED: ${{ vars.LLM_PRIMARY_ENABLED || secrets.LLM_PRIMARY_ENABLED }}
+          LLM_PRIMARY_EXTRA_HEADERS: ${{ vars.LLM_PRIMARY_EXTRA_HEADERS || secrets.LLM_PRIMARY_EXTRA_HEADERS }}
 
-def _fetch_spot() -> "pd.DataFrame":
-    """拉取全 A 股实时快照行情。"""
-    import akshare as ak
+          LLM_SECONDARY_PROTOCOL: ${{ vars.LLM_SECONDARY_PROTOCOL || secrets.LLM_SECONDARY_PROTOCOL }}
+          LLM_SECONDARY_BASE_URL: ${{ vars.LLM_SECONDARY_BASE_URL || secrets.LLM_SECONDARY_BASE_URL }}
+          LLM_SECONDARY_API_KEY: ${{ secrets.LLM_SECONDARY_API_KEY }}
+          LLM_SECONDARY_API_KEYS: ${{ secrets.LLM_SECONDARY_API_KEYS }}
+          LLM_SECONDARY_MODELS: ${{ vars.LLM_SECONDARY_MODELS || secrets.LLM_SECONDARY_MODELS }}
+          LLM_SECONDARY_ENABLED: ${{ vars.LLM_SECONDARY_ENABLED || secrets.LLM_SECONDARY_ENABLED }}
+          LLM_SECONDARY_EXTRA_HEADERS: ${{ vars.LLM_SECONDARY_EXTRA_HEADERS || secrets.LLM_SECONDARY_EXTRA_HEADERS }}
 
-    logger.info("正在拉取全 A 股实时行情 (ak.stock_zh_a_spot_em) ...")
-    df = ak.stock_zh_a_spot_em()
-    logger.info("拉取完成，共 %d 条记录", len(df))
-    return df
+          LLM_GEMINI_PROTOCOL: ${{ vars.LLM_GEMINI_PROTOCOL || secrets.LLM_GEMINI_PROTOCOL }}
+          LLM_GEMINI_BASE_URL: ${{ vars.LLM_GEMINI_BASE_URL || secrets.LLM_GEMINI_BASE_URL }}
+          LLM_GEMINI_API_KEY: ${{ secrets.LLM_GEMINI_API_KEY }}
+          LLM_GEMINI_API_KEYS: ${{ secrets.LLM_GEMINI_API_KEYS }}
+          LLM_GEMINI_MODELS: ${{ vars.LLM_GEMINI_MODELS || secrets.LLM_GEMINI_MODELS }}
+          LLM_GEMINI_ENABLED: ${{ vars.LLM_GEMINI_ENABLED || secrets.LLM_GEMINI_ENABLED }}
+          LLM_GEMINI_EXTRA_HEADERS: ${{ vars.LLM_GEMINI_EXTRA_HEADERS || secrets.LLM_GEMINI_EXTRA_HEADERS }}
 
+          LLM_DEEPSEEK_PROTOCOL: ${{ vars.LLM_DEEPSEEK_PROTOCOL || secrets.LLM_DEEPSEEK_PROTOCOL }}
+          LLM_DEEPSEEK_BASE_URL: ${{ vars.LLM_DEEPSEEK_BASE_URL || secrets.LLM_DEEPSEEK_BASE_URL }}
+          LLM_DEEPSEEK_API_KEY: ${{ secrets.LLM_DEEPSEEK_API_KEY }}
+          LLM_DEEPSEEK_API_KEYS: ${{ secrets.LLM_DEEPSEEK_API_KEYS }}
+          LLM_DEEPSEEK_MODELS: ${{ vars.LLM_DEEPSEEK_MODELS || secrets.LLM_DEEPSEEK_MODELS }}
+          LLM_DEEPSEEK_ENABLED: ${{ vars.LLM_DEEPSEEK_ENABLED || secrets.LLM_DEEPSEEK_ENABLED }}
+          LLM_DEEPSEEK_EXTRA_HEADERS: ${{ vars.LLM_DEEPSEEK_EXTRA_HEADERS || secrets.LLM_DEEPSEEK_EXTRA_HEADERS }}
 
-def _fetch_history(code: str, days: int = 30) -> "pd.DataFrame":
-    """拉取单只股票的日 K 线历史数据用于计算均线。"""
-    import akshare as ak
+          LLM_AIHUBMIX_PROTOCOL: ${{ vars.LLM_AIHUBMIX_PROTOCOL || secrets.LLM_AIHUBMIX_PROTOCOL }}
+          LLM_AIHUBMIX_BASE_URL: ${{ vars.LLM_AIHUBMIX_BASE_URL || secrets.LLM_AIHUBMIX_BASE_URL }}
+          LLM_AIHUBMIX_API_KEY: ${{ secrets.LLM_AIHUBMIX_API_KEY }}
+          LLM_AIHUBMIX_API_KEYS: ${{ secrets.LLM_AIHUBMIX_API_KEYS }}
+          LLM_AIHUBMIX_MODELS: ${{ vars.LLM_AIHUBMIX_MODELS || secrets.LLM_AIHUBMIX_MODELS }}
+          LLM_AIHUBMIX_ENABLED: ${{ vars.LLM_AIHUBMIX_ENABLED || secrets.LLM_AIHUBMIX_ENABLED }}
+          LLM_AIHUBMIX_EXTRA_HEADERS: ${{ vars.LLM_AIHUBMIX_EXTRA_HEADERS || secrets.LLM_AIHUBMIX_EXTRA_HEADERS }}
 
-    from datetime import datetime, timedelta
+          LLM_ANSPIRE_PROTOCOL: ${{ vars.LLM_ANSPIRE_PROTOCOL || secrets.LLM_ANSPIRE_PROTOCOL }}
+          LLM_ANSPIRE_BASE_URL: ${{ vars.LLM_ANSPIRE_BASE_URL || secrets.LLM_ANSPIRE_BASE_URL }}
+          LLM_ANSPIRE_API_KEY: ${{ secrets.LLM_ANSPIRE_API_KEY }}
+          LLM_ANSPIRE_API_KEYS: ${{ secrets.LLM_ANSPIRE_API_KEYS }}
+          LLM_ANSPIRE_MODELS: ${{ vars.LLM_ANSPIRE_MODELS || secrets.LLM_ANSPIRE_MODELS }}
+          LLM_ANSPIRE_ENABLED: ${{ vars.LLM_ANSPIRE_ENABLED || secrets.LLM_ANSPIRE_ENABLED }}
+          LLM_ANSPIRE_EXTRA_HEADERS: ${{ vars.LLM_ANSPIRE_EXTRA_HEADERS || secrets.LLM_ANSPIRE_EXTRA_HEADERS }}
 
-    end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=days + 20)).strftime("%Y%m%d")
-    df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq")
-    return df
+          LLM_OPENAI_PROTOCOL: ${{ vars.LLM_OPENAI_PROTOCOL || secrets.LLM_OPENAI_PROTOCOL }}
+          LLM_OPENAI_BASE_URL: ${{ vars.LLM_OPENAI_BASE_URL || secrets.LLM_OPENAI_BASE_URL }}
+          LLM_OPENAI_API_KEY: ${{ secrets.LLM_OPENAI_API_KEY }}
+          LLM_OPENAI_API_KEYS: ${{ secrets.LLM_OPENAI_API_KEYS }}
+          LLM_OPENAI_MODELS: ${{ vars.LLM_OPENAI_MODELS || secrets.LLM_OPENAI_MODELS }}
+          LLM_OPENAI_ENABLED: ${{ vars.LLM_OPENAI_ENABLED || secrets.LLM_OPENAI_ENABLED }}
+          LLM_OPENAI_EXTRA_HEADERS: ${{ vars.LLM_OPENAI_EXTRA_HEADERS || secrets.LLM_OPENAI_EXTRA_HEADERS }}
 
+          LLM_ANTHROPIC_PROTOCOL: ${{ vars.LLM_ANTHROPIC_PROTOCOL || secrets.LLM_ANTHROPIC_PROTOCOL }}
+          LLM_ANTHROPIC_BASE_URL: ${{ vars.LLM_ANTHROPIC_BASE_URL || secrets.LLM_ANTHROPIC_BASE_URL }}
+          LLM_ANTHROPIC_API_KEY: ${{ secrets.LLM_ANTHROPIC_API_KEY }}
+          LLM_ANTHROPIC_API_KEYS: ${{ secrets.LLM_ANTHROPIC_API_KEYS }}
+          LLM_ANTHROPIC_MODELS: ${{ vars.LLM_ANTHROPIC_MODELS || secrets.LLM_ANTHROPIC_MODELS }}
+          LLM_ANTHROPIC_ENABLED: ${{ vars.LLM_ANTHROPIC_ENABLED || secrets.LLM_ANTHROPIC_ENABLED }}
+          LLM_ANTHROPIC_EXTRA_HEADERS: ${{ vars.LLM_ANTHROPIC_EXTRA_HEADERS || secrets.LLM_ANTHROPIC_EXTRA_HEADERS }}
 
-def _screen_with_history(df_spot: "pd.DataFrame", max_count: int = 10) -> List[str]:
-    """
-    策略一（精确版）：逐只拉取历史 K 线计算均线。
-    适用于候选股数量较少的场景。
+          LLM_MOONSHOT_PROTOCOL: ${{ vars.LLM_MOONSHOT_PROTOCOL || secrets.LLM_MOONSHOT_PROTOCOL }}
+          LLM_MOONSHOT_BASE_URL: ${{ vars.LLM_MOONSHOT_BASE_URL || secrets.LLM_MOONSHOT_BASE_URL }}
+          LLM_MOONSHOT_API_KEY: ${{ secrets.LLM_MOONSHOT_API_KEY }}
+          LLM_MOONSHOT_API_KEYS: ${{ secrets.LLM_MOONSHOT_API_KEYS }}
+          LLM_MOONSHOT_MODELS: ${{ vars.LLM_MOONSHOT_MODELS || secrets.LLM_MOONSHOT_MODELS }}
+          LLM_MOONSHOT_ENABLED: ${{ vars.LLM_MOONSHOT_ENABLED || secrets.LLM_MOONSHOT_ENABLED }}
+          LLM_MOONSHOT_EXTRA_HEADERS: ${{ vars.LLM_MOONSHOT_EXTRA_HEADERS || secrets.LLM_MOONSHOT_EXTRA_HEADERS }}
 
-    先用实时快照做粗筛，再对粗筛结果逐一拉历史 K 线计算均线确认。
-    """
-    import pandas as pd
+          LLM_DASHSCOPE_PROTOCOL: ${{ vars.LLM_DASHSCOPE_PROTOCOL || secrets.LLM_DASHSCOPE_PROTOCOL }}
+          LLM_DASHSCOPE_BASE_URL: ${{ vars.LLM_DASHSCOPE_BASE_URL || secrets.LLM_DASHSCOPE_BASE_URL }}
+          LLM_DASHSCOPE_API_KEY: ${{ secrets.LLM_DASHSCOPE_API_KEY }}
+          LLM_DASHSCOPE_API_KEYS: ${{ secrets.LLM_DASHSCOPE_API_KEYS }}
+          LLM_DASHSCOPE_MODELS: ${{ vars.LLM_DASHSCOPE_MODELS || secrets.LLM_DASHSCOPE_MODELS }}
+          LLM_DASHSCOPE_ENABLED: ${{ vars.LLM_DASHSCOPE_ENABLED || secrets.LLM_DASHSCOPE_ENABLED }}
+          LLM_DASHSCOPE_EXTRA_HEADERS: ${{ vars.LLM_DASHSCOPE_EXTRA_HEADERS || secrets.LLM_DASHSCOPE_EXTRA_HEADERS }}
 
-    # --- 粗筛：用实时快照字段 ---
-    df = df_spot.copy()
+          LLM_ZHIPU_PROTOCOL: ${{ vars.LLM_ZHIPU_PROTOCOL || secrets.LLM_ZHIPU_PROTOCOL }}
+          LLM_ZHIPU_BASE_URL: ${{ vars.LLM_ZHIPU_BASE_URL || secrets.LLM_ZHIPU_BASE_URL }}
+          LLM_ZHIPU_API_KEY: ${{ secrets.LLM_ZHIPU_API_KEY }}
+          LLM_ZHIPU_API_KEYS: ${{ secrets.LLM_ZHIPU_API_KEYS }}
+          LLM_ZHIPU_MODELS: ${{ vars.LLM_ZHIPU_MODELS || secrets.LLM_ZHIPU_MODELS }}
+          LLM_ZHIPU_ENABLED: ${{ vars.LLM_ZHIPU_ENABLED || secrets.LLM_ZHIPU_ENABLED }}
+          LLM_ZHIPU_EXTRA_HEADERS: ${{ vars.LLM_ZHIPU_EXTRA_HEADERS || secrets.LLM_ZHIPU_EXTRA_HEADERS }}
 
-    # 过滤 ST、退市
-    df = df[~df["名称"].str.contains(r"ST|\*ST|退", regex=True, na=False)]
-    # 涨跌幅有效
-    df = df[df["涨跌幅"] != "-"]
-    df["涨跌幅"] = pd.to_numeric(df["涨跌幅"], errors="coerce")
-    df = df.dropna(subset=["涨跌幅"])
+          LLM_MINIMAX_PROTOCOL: ${{ vars.LLM_MINIMAX_PROTOCOL || secrets.LLM_MINIMAX_PROTOCOL }}
+          LLM_MINIMAX_BASE_URL: ${{ vars.LLM_MINIMAX_BASE_URL || secrets.LLM_MINIMAX_BASE_URL }}
+          LLM_MINIMAX_API_KEY: ${{ secrets.LLM_MINIMAX_API_KEY }}
+          LLM_MINIMAX_API_KEYS: ${{ secrets.LLM_MINIMAX_API_KEYS }}
+          LLM_MINIMAX_MODELS: ${{ vars.LLM_MINIMAX_MODELS || secrets.LLM_MINIMAX_MODELS }}
+          LLM_MINIMAX_ENABLED: ${{ vars.LLM_MINIMAX_ENABLED || secrets.LLM_MINIMAX_ENABLED }}
+          LLM_MINIMAX_EXTRA_HEADERS: ${{ vars.LLM_MINIMAX_EXTRA_HEADERS || secrets.LLM_MINIMAX_EXTRA_HEADERS }}
 
-    # 粗筛条件：涨跌幅温和（不追高）
-    rough = df[(df["涨跌幅"] >= -2) & (df["涨跌幅"] <= 5)]
-    # 按成交额降序，优先关注活跃股
-    if "成交额" in rough.columns:
-        rough = rough.sort_values("成交额", ascending=False)
+          LLM_VOLCENGINE_PROTOCOL: ${{ vars.LLM_VOLCENGINE_PROTOCOL || secrets.LLM_VOLCENGINE_PROTOCOL }}
+          LLM_VOLCENGINE_BASE_URL: ${{ vars.LLM_VOLCENGINE_BASE_URL || secrets.LLM_VOLCENGINE_BASE_URL }}
+          LLM_VOLCENGINE_API_KEY: ${{ secrets.LLM_VOLCENGINE_API_KEY }}
+          LLM_VOLCENGINE_API_KEYS: ${{ secrets.LLM_VOLCENGINE_API_KEYS }}
+          LLM_VOLCENGINE_MODELS: ${{ vars.LLM_VOLCENGINE_MODELS || secrets.LLM_VOLCENGINE_MODELS }}
+          LLM_VOLCENGINE_ENABLED: ${{ vars.LLM_VOLCENGINE_ENABLED || secrets.LLM_VOLCENGINE_ENABLED }}
+          LLM_VOLCENGINE_EXTRA_HEADERS: ${{ vars.LLM_VOLCENGINE_EXTRA_HEADERS || secrets.LLM_VOLCENGINE_EXTRA_HEADERS }}
 
-    # 最多取前 50 只做精细筛选
-    candidates = rough.head(50)
-    logger.info("粗筛后候选股数量: %d", len(candidates))
+          LLM_SILICONFLOW_PROTOCOL: ${{ vars.LLM_SILICONFLOW_PROTOCOL || secrets.LLM_SILICONFLOW_PROTOCOL }}
+          LLM_SILICONFLOW_BASE_URL: ${{ vars.LLM_SILICONFLOW_BASE_URL || secrets.LLM_SILICONFLOW_BASE_URL }}
+          LLM_SILICONFLOW_API_KEY: ${{ secrets.LLM_SILICONFLOW_API_KEY }}
+          LLM_SILICONFLOW_API_KEYS: ${{ secrets.LLM_SILICONFLOW_API_KEYS }}
+          LLM_SILICONFLOW_MODELS: ${{ vars.LLM_SILICONFLOW_MODELS || secrets.LLM_SILICONFLOW_MODELS }}
+          LLM_SILICONFLOW_ENABLED: ${{ vars.LLM_SILICONFLOW_ENABLED || secrets.LLM_SILICONFLOW_ENABLED }}
+          LLM_SILICONFLOW_EXTRA_HEADERS: ${{ vars.LLM_SILICONFLOW_EXTRA_HEADERS || secrets.LLM_SILICONFLOW_EXTRA_HEADERS }}
 
-    # --- 精筛：逐只拉历史 K 线计算 MA ---
-    results: List[str] = []
-    for _, row in candidates.iterrows():
-        code = str(row["代码"])
-        if len(results) >= max_count:
-            break
-        try:
-            hist = _fetch_history(code, days=30)
-            if hist is None or hist.empty:
-                continue
-            hist["MA5"] = _compute_ma(hist, "收盘", 5)
-            hist["MA10"] = _compute_ma(hist, "收盘", 10)
-            hist["MA20"] = _compute_ma(hist, "收盘", 20)
-            hist["MA5_volume"] = _compute_ma(hist, "成交量", 5)
+          LLM_OPENROUTER_PROTOCOL: ${{ vars.LLM_OPENROUTER_PROTOCOL || secrets.LLM_OPENROUTER_PROTOCOL }}
+          LLM_OPENROUTER_BASE_URL: ${{ vars.LLM_OPENROUTER_BASE_URL || secrets.LLM_OPENROUTER_BASE_URL }}
+          LLM_OPENROUTER_API_KEY: ${{ secrets.LLM_OPENROUTER_API_KEY }}
+          LLM_OPENROUTER_API_KEYS: ${{ secrets.LLM_OPENROUTER_API_KEYS }}
+          LLM_OPENROUTER_MODELS: ${{ vars.LLM_OPENROUTER_MODELS || secrets.LLM_OPENROUTER_MODELS }}
+          LLM_OPENROUTER_ENABLED: ${{ vars.LLM_OPENROUTER_ENABLED || secrets.LLM_OPENROUTER_ENABLED }}
+          LLM_OPENROUTER_EXTRA_HEADERS: ${{ vars.LLM_OPENROUTER_EXTRA_HEADERS || secrets.LLM_OPENROUTER_EXTRA_HEADERS }}
 
-            last = hist.iloc[-1]
-            # 均线多头排列
-            if not (last["MA5"] > last["MA10"] > last["MA20"]):
-                continue
-            # 放量：当日成交量 > 5 日均量
-            if last["成交量"] <= last["MA5_volume"]:
-                continue
+          LLM_OLLAMA_PROTOCOL: ${{ vars.LLM_OLLAMA_PROTOCOL || secrets.LLM_OLLAMA_PROTOCOL }}
+          LLM_OLLAMA_BASE_URL: ${{ vars.LLM_OLLAMA_BASE_URL || secrets.LLM_OLLAMA_BASE_URL }}
+          LLM_OLLAMA_API_KEY: ${{ secrets.LLM_OLLAMA_API_KEY }}
+          LLM_OLLAMA_API_KEYS: ${{ secrets.LLM_OLLAMA_API_KEYS }}
+          LLM_OLLAMA_MODELS: ${{ vars.LLM_OLLAMA_MODELS || secrets.LLM_OLLAMA_MODELS }}
+          LLM_OLLAMA_ENABLED: ${{ vars.LLM_OLLAMA_ENABLED || secrets.LLM_OLLAMA_ENABLED }}
+          LLM_OLLAMA_EXTRA_HEADERS: ${{ vars.LLM_OLLAMA_EXTRA_HEADERS || secrets.LLM_OLLAMA_EXTRA_HEADERS }}
 
-            results.append(code)
-            logger.info("入选: %s %s  价格=%.2f  涨跌幅=%.2f%%", code, row.get("名称", ""), last["收盘"], row["涨跌幅"])
-        except Exception as e:
-            logger.debug("跳过 %s: %s", code, e)
-            continue
+          # ==========================================
+          # 数据源
+          # ==========================================
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          # Longbridge OpenAPI（美股/港股实时行情字段补充；不设则仅 YFinance/AkShare，无 [Longbridge] 调用）
+          LONGBRIDGE_OAUTH_CLIENT_ID: ${{ vars.LONGBRIDGE_OAUTH_CLIENT_ID || secrets.LONGBRIDGE_OAUTH_CLIENT_ID }}
+          LONGBRIDGE_OAUTH_TOKEN_CACHE_B64: ${{ secrets.LONGBRIDGE_OAUTH_TOKEN_CACHE_B64 }}
+          LONGBRIDGE_APP_KEY: ${{ secrets.LONGBRIDGE_APP_KEY }}
+          LONGBRIDGE_APP_SECRET: ${{ secrets.LONGBRIDGE_APP_SECRET }}
+          LONGBRIDGE_ACCESS_TOKEN: ${{ secrets.LONGBRIDGE_ACCESS_TOKEN }}
+          LONGBRIDGE_REGION: ${{ vars.LONGBRIDGE_REGION || secrets.LONGBRIDGE_REGION }}
+          LONGBRIDGE_HTTP_URL: ${{ vars.LONGBRIDGE_HTTP_URL || secrets.LONGBRIDGE_HTTP_URL }}
+          LONGBRIDGE_QUOTE_WS_URL: ${{ vars.LONGBRIDGE_QUOTE_WS_URL || secrets.LONGBRIDGE_QUOTE_WS_URL }}
+          LONGBRIDGE_TRADE_WS_URL: ${{ vars.LONGBRIDGE_TRADE_WS_URL || secrets.LONGBRIDGE_TRADE_WS_URL }}
+          LONGBRIDGE_STATIC_INFO_TTL_SECONDS: ${{ vars.LONGBRIDGE_STATIC_INFO_TTL_SECONDS || secrets.LONGBRIDGE_STATIC_INFO_TTL_SECONDS }}
+          LONGBRIDGE_ENABLE_OVERNIGHT: ${{ vars.LONGBRIDGE_ENABLE_OVERNIGHT || secrets.LONGBRIDGE_ENABLE_OVERNIGHT }}
+          LONGBRIDGE_PUSH_CANDLESTICK_MODE: ${{ vars.LONGBRIDGE_PUSH_CANDLESTICK_MODE || secrets.LONGBRIDGE_PUSH_CANDLESTICK_MODE }}
+          LONGBRIDGE_PRINT_QUOTE_PACKAGES: ${{ vars.LONGBRIDGE_PRINT_QUOTE_PACKAGES || secrets.LONGBRIDGE_PRINT_QUOTE_PACKAGES }}
+          
+          # ==========================================
+          # 搜索服务
+          # ==========================================
+          ANSPIRE_API_KEYS: ${{ secrets.ANSPIRE_API_KEYS }} 
+          ANSPIRE_LLM_MODEL: ${{ vars.ANSPIRE_LLM_MODEL || secrets.ANSPIRE_LLM_MODEL }}
+          ANSPIRE_LLM_BASE_URL: ${{ vars.ANSPIRE_LLM_BASE_URL || secrets.ANSPIRE_LLM_BASE_URL }}
+          ANSPIRE_LLM_ENABLED: ${{ vars.ANSPIRE_LLM_ENABLED || secrets.ANSPIRE_LLM_ENABLED }}
+          BOCHA_API_KEYS: ${{ secrets.BOCHA_API_KEYS }}
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+          MINIMAX_API_KEYS: ${{ secrets.MINIMAX_API_KEYS }}
+          BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
+          SEARXNG_BASE_URLS: ${{ vars.SEARXNG_BASE_URLS || secrets.SEARXNG_BASE_URLS }}
+          SEARXNG_PUBLIC_INSTANCES_ENABLED: ${{ vars.SEARXNG_PUBLIC_INSTANCES_ENABLED || secrets.SEARXNG_PUBLIC_INSTANCES_ENABLED }}
+          
+          # ==========================================
+          # 通知渠道（可同时配置多个，全部推送）
+          # ==========================================
+          
+          # 方式一：企业微信 Webhook
+          WECHAT_WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
+          WECHAT_MSG_TYPE: ${{ vars.WECHAT_MSG_TYPE || secrets.WECHAT_MSG_TYPE || 'markdown' }}
+          
+          # 方式二：飞书 Webhook
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+          FEISHU_WEBHOOK_KEYWORD: ${{ vars.FEISHU_WEBHOOK_KEYWORD || secrets.FEISHU_WEBHOOK_KEYWORD }}
+          
+          # 方式三：Telegram
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_MESSAGE_THREAD_ID: ${{ secrets.TELEGRAM_MESSAGE_THREAD_ID }}
+          
+          # 方式四：邮件
+          EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
+          EMAIL_SENDER_NAME: ${{ vars.EMAIL_SENDER_NAME || secrets.EMAIL_SENDER_NAME || 'daily_stock_analysis股票分析助手' }}
+          
+          # 方式五：Pushover
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          PUSHOVER_API_TOKEN: ${{ secrets.PUSHOVER_API_TOKEN }}
 
-    return results
+          # 方式五扩展：ntfy
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
 
+          # 方式五扩展：Gotify
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          
+          # 方式六：PushPlus ⬅️ 新增！
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          PUSHPLUS_TOPIC: ${{ vars.PUSHPLUS_TOPIC || secrets.PUSHPLUS_TOPIC }}
+          
+          # 方式七：自定义 Webhook（钉钉、Bark、自建服务等）
+          CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
+          CUSTOM_WEBHOOK_BEARER_TOKEN: ${{ secrets.CUSTOM_WEBHOOK_BEARER_TOKEN }}
+          CUSTOM_WEBHOOK_BODY_TEMPLATE: ${{ vars.CUSTOM_WEBHOOK_BODY_TEMPLATE || secrets.CUSTOM_WEBHOOK_BODY_TEMPLATE }}
+          WEBHOOK_VERIFY_SSL: ${{ vars.WEBHOOK_VERIFY_SSL || secrets.WEBHOOK_VERIFY_SSL || 'true' }}
+          
+          # 方式八：Discord
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_MAIN_CHANNEL_ID: ${{ secrets.DISCORD_MAIN_CHANNEL_ID }}
+          
+          # 方式九：飞书云文档
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_FOLDER_TOKEN: ${{ secrets.FEISHU_FOLDER_TOKEN }}
+          FEISHU_CHAT_ID: ${{ vars.FEISHU_CHAT_ID || secrets.FEISHU_CHAT_ID }}
+          FEISHU_RECEIVE_ID_TYPE: ${{ vars.FEISHU_RECEIVE_ID_TYPE || secrets.FEISHU_RECEIVE_ID_TYPE }}
+          FEISHU_DOMAIN: ${{ vars.FEISHU_DOMAIN || secrets.FEISHU_DOMAIN }}
 
-def _screen_quick(df_spot: "pd.DataFrame", max_count: int = 10) -> List[str]:
-    """
-    策略二（快速版）：仅用实时快照中可用字段做筛选，不拉历史 K 线。
+          # 方式十：AstrBot
+          ASTRBOT_URL: ${{ secrets.ASTRBOT_URL }}
+          ASTRBOT_TOKEN: ${{ secrets.ASTRBOT_TOKEN }}
 
-    利用"60日涨跌幅 > 0"作为趋势向上一级粗判，
-    适合 GitHub Actions 时间受限的场景（默认使用此策略）。
-    """
-    import pandas as pd
+          # 方式十一：Server酱3
+          SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
 
-    df = df_spot.copy()
+          # 方式十二：Slack
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
 
-    # 过滤 ST、退市
-    df = df[~df["名称"].str.contains(r"ST|\*ST|退", regex=True, na=False)]
-    df = df[df["涨跌幅"] != "-"]
-    df["涨跌幅"] = pd.to_numeric(df["涨跌幅"], errors="coerce")
-    df = df.dropna(subset=["涨跌幅"])
+          # 通知路由策略（留空时保持全部已配置渠道）
+          NOTIFICATION_REPORT_CHANNELS: ${{ vars.NOTIFICATION_REPORT_CHANNELS || secrets.NOTIFICATION_REPORT_CHANNELS }}
+          NOTIFICATION_ALERT_CHANNELS: ${{ vars.NOTIFICATION_ALERT_CHANNELS || secrets.NOTIFICATION_ALERT_CHANNELS }}
+          NOTIFICATION_SYSTEM_ERROR_CHANNELS: ${{ vars.NOTIFICATION_SYSTEM_ERROR_CHANNELS || secrets.NOTIFICATION_SYSTEM_ERROR_CHANNELS }}
+          NOTIFICATION_DEDUP_TTL_SECONDS: ${{ vars.NOTIFICATION_DEDUP_TTL_SECONDS || secrets.NOTIFICATION_DEDUP_TTL_SECONDS || '0' }}
+          NOTIFICATION_COOLDOWN_SECONDS: ${{ vars.NOTIFICATION_COOLDOWN_SECONDS || secrets.NOTIFICATION_COOLDOWN_SECONDS || '0' }}
+          NOTIFICATION_QUIET_HOURS: ${{ vars.NOTIFICATION_QUIET_HOURS || secrets.NOTIFICATION_QUIET_HOURS }}
+          NOTIFICATION_TIMEZONE: ${{ vars.NOTIFICATION_TIMEZONE || secrets.NOTIFICATION_TIMEZONE }}
+          NOTIFICATION_MIN_SEVERITY: ${{ vars.NOTIFICATION_MIN_SEVERITY || secrets.NOTIFICATION_MIN_SEVERITY }}
+          NOTIFICATION_DAILY_DIGEST_ENABLED: ${{ vars.NOTIFICATION_DAILY_DIGEST_ENABLED || secrets.NOTIFICATION_DAILY_DIGEST_ENABLED || 'false' }}
 
-    if "成交量" in df.columns:
-        df["成交量"] = pd.to_numeric(df["成交量"], errors="coerce")
-    if "成交额" in df.columns:
-        df["成交额"] = pd.to_numeric(df["成交额"], errors="coerce")
-    if "换手率" in df.columns:
-        df["换手率"] = pd.to_numeric(df["换手率"], errors="coerce")
-    if "60日涨跌幅" in df.columns:
-        df["60日涨跌幅"] = pd.to_numeric(df["60日涨跌幅"], errors="coerce")
+          # ==========================================
+          # 自选股配置
+          # ==========================================
+          STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST || '600519' }}
+          MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'cn' }}
+          MARKET_REVIEW_COLOR_SCHEME: ${{ vars.MARKET_REVIEW_COLOR_SCHEME || secrets.MARKET_REVIEW_COLOR_SCHEME || 'green_up' }}
+          
+          # ==========================================
+          # 运行配置 ⬅️ 新增！
+          # ==========================================
+          REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
+          REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || '' }}
+          REPORT_SHOW_LLM_MODEL: ${{ vars.REPORT_SHOW_LLM_MODEL || secrets.REPORT_SHOW_LLM_MODEL || 'true' }}
+          SINGLE_STOCK_NOTIFY: ${{ vars.SINGLE_STOCK_NOTIFY || secrets.SINGLE_STOCK_NOTIFY || 'false' }}
+          MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || secrets.MARKET_REVIEW_ENABLED || 'true' }}
+          ANALYSIS_DELAY: ${{ vars.ANALYSIS_DELAY || secrets.ANALYSIS_DELAY || '0' }}
+          TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || secrets.TRADING_DAY_CHECK_ENABLED || 'true' }}
+          
+          # ==========================================
+          # 系统配置
+          # ==========================================
+          LOG_LEVEL: INFO
+          MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '1' }}
+          # 筹码分布：默认 false（云端接口不稳定）；需启用时在 Settings → Variables 添加 ENABLE_CHIP_DISTRIBUTION=true
+          ENABLE_CHIP_DISTRIBUTION: ${{ vars.ENABLE_CHIP_DISTRIBUTION || secrets.ENABLE_CHIP_DISTRIBUTION || 'false' }}
+          # 实时行情数据源优先级（腾讯有量比且稳定，推荐首选）
+          # 可选值: tencent, akshare_sina, efinance, akshare_em, tushare
+          # 如果有 Tushare Pro 高积分账号，可将 tushare 放在首位
+          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
+          
+        run: |
+          # 处理 LITELLM YAML 配置文件
+          if [ -n "$LITELLM_CONFIG_YAML" ] && [ -n "$LITELLM_CONFIG" ]; then
+            echo "📝 使用 GitHub Actions Secrets/Variables 中的 LITELLM_CONFIG_YAML 配置"
+            # 确保目录存在
+            mkdir -p "$(dirname "$LITELLM_CONFIG")"
+            # 写入配置文件（覆盖已有文件）
+            echo "$LITELLM_CONFIG_YAML" > "$LITELLM_CONFIG"
+            echo "✅ LITELLM 配置文件已写入: $LITELLM_CONFIG"
+          fi
 
-    # 构建筛选条件
-    cond = (
-        # 涨跌幅温和，不追高
-        (df["涨跌幅"] >= -2)
-        & (df["涨跌幅"] <= 5)
-        # 成交量 > 0（排除停牌）
-        & (df["成交量"] > 0)
-    )
+          # 判断运行模式
+          MODE="${{ github.event.inputs.mode || 'full' }}"
+          
+          echo "=========================================="
+          echo "🚀 A股自选股智能分析系统"
+          echo "=========================================="
+          echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo "🎯 运行模式: $MODE"
+          echo "📊 自选股: $STOCK_LIST"
+          echo "📝 报告类型: $REPORT_TYPE"
+          echo ""
+          echo "=========================================="
+          echo "📋 配置检查"
+          echo "=========================================="
+          echo "【AI 配置】"
+          if [ -n "$LITELLM_CONFIG" ] || [ -n "$LITELLM_API_KEY" ] || [ -n "$LITELLM_MODEL" ] || [ -n "$ANSPIRE_API_KEYS" ]; then
+            echo "  LiteLLM: ✅ 已配置"
+          else
+            echo "  LiteLLM: ❌ 未配置"
+          fi
+          echo "  Gemini API Key: $([ -n "$GEMINI_API_KEY" ] && echo '✅ 已配置' || echo '❌ 未配置')"
+          echo "  DeepSeek Key:   $([ -n "$DEEPSEEK_API_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Anspire Key:    $([ -n "$ANSPIRE_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  AIHubMix Key:   $([ -n "$AIHUBMIX_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  OpenAI API Key: $([ -n "$OPENAI_API_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Anthropic Key:  $([ -n "$ANTHROPIC_API_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo ""
+          echo "【数据源】"
+          echo "  Tushare Token: $([ -n "$TUSHARE_TOKEN" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          if [ -n "$LONGBRIDGE_APP_KEY" ] && [ -n "$LONGBRIDGE_APP_SECRET" ] && [ -n "$LONGBRIDGE_ACCESS_TOKEN" ]; then
+            echo "  Longbridge: ✅ 已配置（Legacy API Key）"
+          elif [ -n "$LONGBRIDGE_OAUTH_CLIENT_ID" ] || { [ -n "$LONGBRIDGE_APP_KEY" ] && [ -z "$LONGBRIDGE_ACCESS_TOKEN" ]; }; then
+            echo "  Longbridge: $([ -n "$LONGBRIDGE_OAUTH_TOKEN_CACHE_B64" ] && echo '✅ 已配置（OAuth token cache）' || echo '🟡 已配置 OAuth client，缺少 token cache')"
+          else
+            echo "  Longbridge: ⚪ 未配置（仅 YFinance 等，无长桥调用）"
+          fi
+          echo ""
+          echo "【搜索引擎】"
+          echo "  Bocha API Keys: $([ -n "$BOCHA_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Tavily API Keys: $([ -n "$TAVILY_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  SerpAPI Keys: $([ -n "$SERPAPI_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  MiniMax API Keys: $([ -n "$MINIMAX_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Brave API Keys: $([ -n "$BRAVE_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  SearXNG Base URLs: $([ -n "$SEARXNG_BASE_URLS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          case "${SEARXNG_PUBLIC_INSTANCES_ENABLED,,}" in
+            0|false|no|off)
+              echo "  SearXNG Public Instances: ❌ 已禁用"
+              ;;
+            "")
+              echo "  SearXNG Public Instances: ✅ 默认开启"
+              ;;
+            *)
+              echo "  SearXNG Public Instances: ✅ 已启用"
+              ;;
+          esac
+          echo ""
+          echo "【通知渠道】"
+          echo "  PushPlus: $([ -n "$PUSHPLUS_TOKEN" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  ntfy: $([ -n "$NTFY_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Gotify: $([ -n "$GOTIFY_URL" ] && [ -n "$GOTIFY_TOKEN" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  企业微信: $([ -n "$WECHAT_WEBHOOK_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  飞书: $( ([ -n "$FEISHU_WEBHOOK_URL" ] || ([ -n "$FEISHU_APP_ID" ] && [ -n "$FEISHU_APP_SECRET" ] && [ -n "$FEISHU_CHAT_ID" ]) ) && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Telegram: $([ -n "$TELEGRAM_BOT_TOKEN" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Discord: $([ -n "$DISCORD_WEBHOOK_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  AstrBot: $([ -n "$ASTRBOT_URL" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  Slack: $(([ -n "$SLACK_WEBHOOK_URL" ] || ([ -n "$SLACK_BOT_TOKEN" ] && [ -n "$SLACK_CHANNEL_ID" ])) && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "=========================================="
+          echo ""
+          
+          # 构建命令行参数
+          FORCE_RUN_ARG=""
+          if [ "${{ github.event.inputs.force_run }}" = "true" ]; then
+            FORCE_RUN_ARG="--force-run"
+            echo "⚡ 已启用强制运行模式（跳过交易日检查）"
+          fi
 
-    # 60日涨跌幅为正（中期趋势向上），如果该列存在
-    if "60日涨跌幅" in df.columns:
-        cond = cond & (df["60日涨跌幅"] > 0)
-
-    # 换手率在合理区间（1%~15%），如果该列存在
-    if "换手率" in df.columns:
-        cond = cond & (df["换手率"] >= 1) & (df["换手率"] <= 15)
-
-    screen_result = df[cond]
-
-    # 按成交额降序
-    if "成交额" in screen_result.columns:
-        screen_result = screen_result.sort_values("成交额", ascending=False)
-
-    stock_code_list = screen_result["代码"].head(max_count).tolist()
-    return stock_code_list
-
-
-def auto_screen_stocks(
-    max_count: int = 10,
-    use_history: bool = False,
-) -> str:
-    """
-    执行自动选股，返回逗号分隔的股票代码字符串。
-
-    Args:
-        max_count: 最多返回的股票数量
-        use_history: 是否拉取历史K线计算均线（精确但慢）
-
-    Returns:
-        逗号分隔的股票代码字符串，如 "600519,000001"
-    """
-    df = _fetch_spot()
-
-    if use_history:
-        stock_code_list = _screen_with_history(df, max_count=max_count)
-    else:
-        stock_code_list = _screen_quick(df, max_count=max_count)
-
-    if not stock_code_list:
-        logger.warning("未筛选到符合条件的股票，将使用默认股票池")
-        return ""
-
-    stock_str = ",".join(stock_code_list)
-    logger.info("今日自动筛选股票池（%d 只）: %s", len(stock_code_list), stock_str)
-
-    # 写入临时文件（供本地运行 main.py 时读取）
-    env_path = os.path.join(os.getcwd(), ".auto_stock_env")
-    try:
-        with open(env_path, "w", encoding="utf-8") as f:
-            f.write(f"STOCK_LIST={stock_str}")
-        logger.info("选股结果已写入 %s", env_path)
-    except OSError as e:
-        logger.warning("写入 .auto_stock_env 失败: %s", e)
-
-    # GitHub Actions / 本地：直接设置环境变量，供同进程后续读取
-    os.environ["STOCK_LIST"] = stock_str
-
-    return stock_str
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="A股自动选股")
-    parser.add_argument("--max", type=int, default=10, help="最多筛选的股票数量（默认 10）")
-    parser.add_argument(
-        "--use-history",
-        action="store_true",
-        help="拉取历史K线精确计算均线（较慢，默认关闭）",
-    )
-    args = parser.parse_args()
-
-    stock_str = auto_screen_stocks(max_count=args.max, use_history=args.use_history)
-    if stock_str:
-        print(f"STOCK_LIST={stock_str}")
-        return 0
-    else:
-        print("未筛选到符合条件的股票")
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+          # 执行分析
+          if [ "$MODE" = "market-only" ]; then
+            python main.py --market-review $FORCE_RUN_ARG
+          elif [ "$MODE" = "stocks-only" ]; then
+            python main.py --no-market-review $FORCE_RUN_ARG
+          else
+            python main.py $FORCE_RUN_ARG
+          fi
+      
+      - name: 上传分析报告
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: analysis-reports-${{ github.run_number }}
+          path: |
+            reports/
+            logs/
+          retention-days: 30
+      
+      - name: 显示运行结果
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📊 分析完成"
+          echo "=========================================="
+          if [ -d "reports" ] && [ "$(ls -A reports 2>/dev/null)" ]; then
+            echo "生成的报告:"
+            ls -la reports/
+          else
+            echo "⚠️ 未生成报告文件"
+          fi
+          echo ""
+          if [ -f "logs/stock_analysis_$(date +%Y%m%d).log" ]; then
+            echo "📜 最近日志（最后 30 行）:"
+            tail -30 logs/stock_analysis_*.log 2>/dev/null || echo "无日志"
+          fi
