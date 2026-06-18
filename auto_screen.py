@@ -5,9 +5,10 @@
 参考 DataFetcherManager 的设计模式，实现多数据源自动故障切换：
 
 数据源优先级：
-  1. efinance（东方财富爬虫库，API 简洁稳定）
-  2. akshare_em（东方财富接口，字段最全）
-  3. akshare_sina（新浪财经接口，备用兜底）
+  1. tencent_batch（腾讯批量实时接口，海外稳定、秒级响应，首选）
+  2. efinance（东方财富爬虫库，API 简洁稳定）
+  3. akshare_em（东方财富接口，字段最全）
+  4. akshare_sina（新浪财经接口，备用兜底，超时 120s）
 
 每种数据源带独立重试和熔断机制，连续失败后自动跳过，
 切换到下一个数据源，确保选股不因单一源故障而中断。
@@ -49,6 +50,18 @@ try:
     _AK_CALL_TIMEOUT = int(os.environ.get("AKSHARE_CALL_TIMEOUT", "30"))
 except (ValueError, TypeError):
     _AK_CALL_TIMEOUT = 30
+
+# akshare_sina 分页拉取慢，超时放宽到 120s
+try:
+    _AK_SINA_TIMEOUT = int(os.environ.get("AKSHARE_SINA_TIMEOUT", "120"))
+except (ValueError, TypeError):
+    _AK_SINA_TIMEOUT = 120
+
+# 腾讯批量接口超时（每次请求约 800 只，通常 <10s）
+try:
+    _TENCENT_BATCH_TIMEOUT = int(os.environ.get("TENCENT_BATCH_TIMEOUT", "30"))
+except (ValueError, TypeError):
+    _TENCENT_BATCH_TIMEOUT = 30
 
 
 # ============================
@@ -162,7 +175,229 @@ def _compute_ma(df, col: str, window: int) -> "pd.Series":
 
 
 # ============================
-# 数据源 1: efinance（首选）
+# 数据源 0: 腾讯批量实时接口（首选，海外稳定）
+# ============================
+# 腾讯接口 http://qt.gtimg.cn/q=sh600519,sz000001,... 支持批量查询
+# 每次请求最多约 900 只股票，海外连接稳定、响应快（秒级）
+# 参考 data_provider/akshare_fetcher.py 的 _get_stock_realtime_quote_tencent
+
+_TENCENT_ENDPOINT = "http://qt.gtimg.cn/q="
+_TENCENT_BATCH_SIZE = 800  # 每批最多查询数量
+
+
+def _to_tencent_symbol(code: str) -> str:
+    """将 6 位 A 股代码转换为腾讯格式 sh600519 / sz000001 / bj920748。"""
+    base = code.strip().split(".")[0] if "." in code else code.strip()
+    if base.startswith(("8", "4", "9")):  # 北交所
+        return f"bj{base}"
+    if base.startswith(("6", "5", "9")):
+        return f"sh{base}"
+    return f"sz{base}"
+
+
+def _parse_tencent_batch_response(text: str) -> List[Dict[str, Any]]:
+    """
+    解析腾讯批量行情响应文本，返回统一列名字典列表。
+
+    腾讯字段顺序（~分隔）：
+      1:名称 2:代码 3:最新价 4:昨收 5:今开 6:成交量 7:外盘 8:内盘
+      9-28:买卖五档 30:时间戳 31:涨跌额 32:涨跌幅(%) 33:最高 34:最低
+      35:收盘/成交量/成交额 36:成交量(口径随 payload 变化) 37:成交额(万)
+      38:换手率(%) 39:市盈率 43:振幅(%) 44:流通市值(亿) 45:总市值(亿)
+      46:市净率 47:涨停价 48:跌停价 49:量比
+    """
+    import re
+
+    results: List[Dict[str, Any]] = []
+    # 腾讯响应格式：v_sh600519="1~贵州茅台~600519~1680.00~...~";
+    blocks = text.split(";")
+    for block in blocks:
+        block = block.strip()
+        if not block or '=""' in block:
+            continue
+        # 提取引号内数据
+        match = re.search(r'"([^"]+)"', block)
+        if not match:
+            continue
+        data_str = match.group(1)
+        fields = data_str.split("~")
+        if len(fields) < 35:
+            continue
+
+        def _safe_float(idx: int) -> Optional[float]:
+            if idx >= len(fields) or not fields[idx]:
+                return None
+            try:
+                return float(fields[idx])
+            except (ValueError, TypeError):
+                return None
+
+        def _safe_int(idx: int) -> Optional[int]:
+            val = _safe_float(idx)
+            return int(val) if val is not None else None
+
+        row = {
+            "代码": fields[2] if len(fields) > 2 else "",
+            "名称": fields[1] if len(fields) > 1 else "",
+            "最新价": _safe_float(3),
+            "昨收": _safe_float(4),
+            "开盘": _safe_float(5),
+            "成交量": _safe_int(6),  # 成交量（手）
+            "涨跌额": _safe_float(31),
+            "涨跌幅": _safe_float(32),
+            "最高": _safe_float(33),
+            "最低": _safe_float(34),
+            "成交额": _safe_float(37),  # 成交额（万元）→ 后续转换为元
+            "换手率": _safe_float(38),
+            "市盈率": _safe_float(39),
+            "振幅": _safe_float(43),
+            "流通市值": _safe_float(44),  # 亿
+            "总市值": _safe_float(45),  # 亿
+            "量比": _safe_float(49),
+        }
+        results.append(row)
+    return results
+
+
+def _generate_all_a_share_codes() -> List[str]:
+    """
+    生成全 A 股 6 位代码列表。
+
+    范围：
+      - 沪市主板: 600000-609999
+      - 沪市科创板: 688000-689999
+      - 深市主板: 000001-003999
+      - 深市创业板: 300000-301999
+      - 北交所: 830000-920999
+    """
+    codes: List[str] = []
+
+    # 沪市主板 600000-609999
+    for i in range(600000, 610000):
+        codes.append(str(i))
+    # 科创板 688000-689999
+    for i in range(688000, 690000):
+        codes.append(str(i))
+    # 深市主板 000001-003999
+    for i in range(1, 4000):
+        codes.append(f"{i:06d}")
+    # 创业板 300000-301999
+    for i in range(300000, 302000):
+        codes.append(str(i))
+    # 北交所 830000-839999, 870000-879999, 920000-920999
+    for i in range(830000, 840000):
+        codes.append(str(i))
+    for i in range(870000, 880000):
+        codes.append(str(i))
+    for i in range(920000, 921000):
+        codes.append(str(i))
+
+    return codes
+
+
+def _fetch_realtime_tencent_batch(max_retries: int = 3, retry_delay: float = 3.0) -> Optional["pd.DataFrame"]:
+    """
+    通过腾讯批量实时接口拉取全 A 股行情。
+
+    腾讯接口 http://qt.gtimg.cn/q=sh600519,sz000001,... 支持批量查询，
+    海外服务器连接稳定、响应快（每批 <10s），适合 GitHub Actions 环境。
+
+    策略：生成所有可能的 A 股代码，分批请求腾讯接口，过滤无效响应。
+    """
+    import pandas as pd
+    import requests
+
+    source = "tencent_batch"
+    if not _circuit_breaker.is_available(source):
+        logger.info("[熔断] 数据源 %s 处于熔断状态，跳过", source)
+        return None
+
+    all_codes = _generate_all_a_share_codes()
+    logger.info(
+        "腾讯批量接口：共 %d 个候选代码，分批查询（每批 %d 只）",
+        len(all_codes),
+        _TENCENT_BATCH_SIZE,
+    )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "http://finance.qq.com",
+    }
+
+    last_error: Optional[Exception] = None
+    all_rows: List[Dict[str, Any]] = []
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            all_rows = []
+            total_batches = (len(all_codes) + _TENCENT_BATCH_SIZE - 1) // _TENCENT_BATCH_SIZE
+
+            for batch_idx in range(total_batches):
+                start = batch_idx * _TENCENT_BATCH_SIZE
+                end = min(start + _TENCENT_BATCH_SIZE, len(all_codes))
+                batch_codes = all_codes[start:end]
+
+                # 转换为腾讯格式
+                symbols = [_to_tencent_symbol(c) for c in batch_codes]
+                query = ",".join(symbols)
+                url = f"{_TENCENT_ENDPOINT}{query}"
+
+                logger.info(
+                    "腾讯批量请求 [%d/%d] 代码 %d-%d ...",
+                    batch_idx + 1,
+                    total_batches,
+                    start,
+                    end,
+                )
+
+                resp = requests.get(url, headers=headers, timeout=_TENCENT_BATCH_TIMEOUT)
+                resp.encoding = "gbk"
+
+                rows = _parse_tencent_batch_response(resp.text)
+                # 过滤无效数据（价格为 0 或 None 说明代码不存在）
+                valid_rows = [r for r in rows if r.get("最新价") and r["最新价"] > 0]
+                all_rows.extend(valid_rows)
+
+                logger.info(
+                    "  批次 %d: 解析 %d 条，有效 %d 条",
+                    batch_idx + 1,
+                    len(rows),
+                    len(valid_rows),
+                )
+
+            if all_rows:
+                df = pd.DataFrame(all_rows)
+                # 成交额从万元转换为元
+                if "成交额" in df.columns:
+                    df["成交额"] = df["成交额"] * 10000
+                # 市值从亿转换为元
+                if "流通市值" in df.columns:
+                    df["流通市值"] = df["流通市值"] * 100000000
+                if "总市值" in df.columns:
+                    df["总市值"] = df["总市值"] * 100000000
+
+                logger.info("腾讯批量拉取完成，共 %d 只有效股票", len(df))
+                _circuit_breaker.record_success(source)
+                return df
+
+            logger.warning("腾讯批量拉取返回空数据 [attempt %d/%d]", attempt, max_retries)
+
+        except Exception as e:
+            last_error = e
+            logger.warning("腾讯批量拉取失败 [attempt %d/%d]: %s", attempt, max_retries, e)
+
+        if attempt < max_retries:
+            wait = retry_delay * attempt
+            logger.info("等待 %.0f 秒后重试...", wait)
+            time.sleep(wait)
+
+    _circuit_breaker.record_failure(source, str(last_error))
+    logger.error("腾讯批量拉取最终失败: %s", last_error)
+    return None
+
+
+# ============================
+# 数据源 1: efinance（次选）
 # ============================
 def _fetch_realtime_efinance(max_retries: int = 3, retry_delay: float = 5.0) -> Optional["pd.DataFrame"]:
     """
@@ -264,14 +499,14 @@ def _fetch_realtime_akshare_sina(max_retries: int = 3, retry_delay: float = 5.0)
     for attempt in range(1, max_retries + 1):
         try:
             logger.info("正在拉取全 A 股实时行情 (ak.stock_zh_a_spot 新浪) ... [attempt %d/%d]", attempt, max_retries)
-            df = _call_with_timeout(ak.stock_zh_a_spot, timeout=_AK_CALL_TIMEOUT)
+            df = _call_with_timeout(ak.stock_zh_a_spot, timeout=_AK_SINA_TIMEOUT)
             if df is not None and not df.empty:
                 logger.info("akshare_sina 拉取完成，共 %d 条记录", len(df))
                 _circuit_breaker.record_success(source)
                 return df
             logger.warning("akshare_sina 返回空数据 [attempt %d/%d]", attempt, max_retries)
         except FuturesTimeoutError:
-            last_error = TimeoutError(f"akshare_sina 调用超时 (>{_AK_CALL_TIMEOUT}s)")
+            last_error = TimeoutError(f"akshare_sina 调用超时 (>{_AK_SINA_TIMEOUT}s)")
             logger.warning("akshare_sina 拉取超时 [attempt %d/%d]", attempt, max_retries)
         except Exception as e:
             last_error = e
@@ -294,10 +529,11 @@ def _fetch_realtime_with_fallback() -> Optional["pd.DataFrame"]:
     """
     依次尝试多个数据源拉取全 A 股行情，自动故障切换。
 
-    优先级：efinance → akshare_em → akshare_sina
+    优先级：tencent_batch → efinance → akshare_em → akshare_sina
     每个数据源有独立熔断器，连续失败后自动跳过。
     """
     sources = [
+        ("tencent_batch", _fetch_realtime_tencent_batch),
         ("efinance", _fetch_realtime_efinance),
         ("akshare_em", _fetch_realtime_akshare_em),
         ("akshare_sina", _fetch_realtime_akshare_sina),
@@ -329,6 +565,7 @@ def _fetch_realtime_with_fallback() -> Optional["pd.DataFrame"]:
 # 列名统一（参考 DataFetcherManager 的 _normalize_columns 模式）
 # ============================
 # 各数据源返回的列名差异：
+# tencent_batch: 代码, 名称, 最新价, 涨跌幅, 涨跌额, 成交量, 成交额, 振幅, 最高, 最低, 开盘, 换手率, 量比, 市盈率, 总市值, 流通市值, 昨收（本模块自行解析，已统一）
 # efinance:     股票代码, 股票名称, 最新价, 涨跌幅, 涨跌额, 成交量, 成交额, 振幅, 最高, 最低, 开盘, 换手率, 量比, 市盈率, 总市值, 流通市值, 昨收
 # akshare_em:   代码, 名称, 最新价, 涨跌幅, 涨跌额, 成交量, 成交额, 振幅, 最高, 最低, 开盘, 换手率, 量比, 市盈率, 总市值, 流通市值, 60日涨跌幅, 昨收
 # akshare_sina: code, name, trade, changepercent, tradevolume, amount, turnoverratio, ...
@@ -653,6 +890,10 @@ def auto_screen_stocks(
 def _detect_source(df: "pd.DataFrame") -> str:
     """通过列名特征判断数据来自哪个源（辅助调试）。"""
     cols = set(df.columns)
+    # 腾讯批量源的特征：列名为中文但来自我们自己解析，含"昨收"但不含"60日涨跌幅"
+    # 且不含"股票代码"（efinance 用"股票代码"而非"代码"）
+    if "代码" in cols and "昨收" in cols and "量比" in cols and "60日涨跌幅" not in cols and "股票代码" not in cols:
+        return "tencent_batch"
     if "股票代码" in cols and "量比" in cols and "昨收" in cols and "60日涨跌幅" not in cols:
         return "efinance"
     if "代码" in cols and "60日涨跌幅" in cols:
