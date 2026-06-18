@@ -59,7 +59,7 @@ jobs:
       - name: 自动选股（筛选今日候选股池）
         env:
           AUTO_SCREEN_ENABLED: ${{ vars.AUTO_SCREEN_ENABLED || 'true' }}
-          AUTO_SCREEN_MAX: ${{ vars.AUTO_SCREEN_MAX || '10' }}
+          AUTO_SCREEN_MAX: ${{ vars.AUTO_SCREEN_MAX || '5' }}
           AUTO_SCREEN_USE_HISTORY: ${{ vars.AUTO_SCREEN_USE_HISTORY || 'false' }}
         run: |
           if [ "${AUTO_SCREEN_ENABLED}" = "true" ]; then
