@@ -463,7 +463,7 @@ jobs:
           fi
 
           # 执行全市场自动筛选
-            python auto_screen.py
+            # python auto_screen.py
 
           # 执行分析
           if [ "$MODE" = "market-only" ]; then
