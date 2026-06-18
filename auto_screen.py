@@ -2,21 +2,35 @@
 """
 自动选股模块
 
-参考 DataFetcherManager 的设计模式，实现多数据源自动故障切换：
+支持两种选股引擎，通过环境变量 SCREEN_METHOD 切换：
 
-数据源优先级：
-  1. tencent_batch（腾讯批量实时接口，海外稳定、秒级响应，首选）
-  2. efinance（东方财富爬虫库，API 简洁稳定）
-  3. akshare_em（东方财富接口，字段最全）
-  4. akshare_sina（新浪财经接口，备用兜底，超时 120s）
+  1. auto_screen（默认）：内置多数据源 + 技术指标筛选
+     数据源优先级：
+       a. tencent_batch（腾讯批量实时接口，海外稳定、秒级响应，首选）
+       b. efinance（东方财富爬虫库，API 简洁稳定）
+       c. akshare_em（东方财富接口，字段最全）
+       d. akshare_sina（新浪财经接口，备用兜底，超时 120s）
+     筛选策略：涨跌幅温和 + 量比/换手率/成交额 + 均线多头排列（可选）
 
-每种数据源带独立重试和熔断机制，连续失败后自动跳过，
-切换到下一个数据源，确保选股不因单一源故障而中断。
+  2. alphasift：AlphaSift 多因子 + LLM 排序选股引擎
+     通过 src.services.alphasift_service.AlphaSiftService.screen() 调用
+     需要 ALPHASIFT_ENABLED=true + LLM 配置
+
+  3. alphasift_fallback：先 AlphaSift，失败 fallback 到 auto_screen
+  4. auto_screen_fallback：先 auto_screen，失败 fallback 到 AlphaSift
 
 用法:
-    python auto_screen.py            # 筛选并打印结果，同时写入 .auto_stock_env
-    python auto_screen.py --max 5     # 最多筛选 5 只
-    python auto_screen.py --use-history  # 拉历史K线精确计算均线
+    python auto_screen.py                         # 默认 auto_screen 选股
+    python auto_screen.py --max 5                  # 最多 5 只
+    python auto_screen.py --use-history             # 拉历史K线算均线
+    python auto_screen.py --method alphasift        # 使用 AlphaSift 选股
+    python auto_screen.py --method alphasift_fallback  # AlphaSift 失败则 fallback
+
+环境变量:
+    SCREEN_METHOD          选股引擎（auto_screen/alphasift/alphasift_fallback/auto_screen_fallback）
+    ALPHASIFT_ENABLED      是否启用 AlphaSift（true/false）
+    ALPHASIFT_STRATEGY     AlphaSift 策略（默认 dual_low）
+    ALPHASIFT_MARKET       AlphaSift 市场（默认 cn）
 
 在 GitHub Actions 中，本脚本在 main.py 之前运行，筛选结果通过
 环境变量 STOCK_LIST 直接传递给 main.py（同时写入 .auto_stock_env 供本地使用）。
@@ -828,6 +842,94 @@ def _screen_quick(df_spot: "pd.DataFrame", max_count: int = 10) -> List[str]:
 
 
 # ============================
+# AlphaSift 选股引擎
+# ============================
+def _screen_alphasift(max_count: int = 10) -> List[str]:
+    """
+    通过 AlphaSift 选股引擎进行选股。
+
+    AlphaSift 是一个基于多因子 + LLM 排序的选股框架，
+    通过 src.services.alphasift_service.AlphaSiftService.screen() 调用。
+
+    需要:
+      - ALPHASIFT_ENABLED=true
+      - alphasift 包已安装（requirements.txt 中已包含）
+      - LLM 配置（用于 LLM 排序，可选但推荐）
+
+    Args:
+        max_count: 最多返回的股票数量
+
+    Returns:
+        股票代码列表，失败时返回空列表
+    """
+    try:
+        from src.config import Config
+        from src.services.alphasift_service import AlphaSiftService
+    except ImportError as e:
+        logger.error("[AlphaSift] 导入 AlphaSift 服务失败: %s", e)
+        return []
+
+    # 确保 ALPHASIFT_ENABLED=true
+    if not os.environ.get("ALPHASIFT_ENABLED", "").lower() in ("true", "1", "yes"):
+        logger.warning("[AlphaSift] ALPHASIFT_ENABLED 未开启，跳过 AlphaSift 选股")
+        return []
+
+    try:
+        config = Config.get_instance()
+    except Exception as e:
+        logger.error("[AlphaSift] 加载配置失败: %s", e)
+        return []
+
+    if not config.alphasift_enabled:
+        logger.warning("[AlphaSift] config.alphasift_enabled=False，跳过 AlphaSift 选股")
+        return []
+
+    strategy = os.environ.get("ALPHASIFT_STRATEGY", "dual_low")
+    market = os.environ.get("ALPHASIFT_MARKET", "cn")
+
+    logger.info(
+        "[AlphaSift] 开始选股: strategy=%s, market=%s, max_results=%d",
+        strategy, market, max_count,
+    )
+
+    try:
+        service = AlphaSiftService(config=config)
+        result = service.screen(
+            strategy=strategy,
+            market=market,
+            max_results=max_count,
+        )
+    except Exception as e:
+        logger.error("[AlphaSift] 选股调用失败: %s", e)
+        return []
+
+    candidates = result.get("candidates") or []
+    if not candidates:
+        logger.warning("[AlphaSift] 选股结果为空 (candidate_count=%s)", result.get("candidate_count"))
+        return []
+
+    stock_codes: List[str] = []
+    for candidate in candidates:
+        code = str(candidate.get("code") or "").strip()
+        if code:
+            # 标准化为 6 位纯数字代码
+            clean_code = code.split(".")[0].replace("sh", "").replace("sz", "").replace("bj", "")
+            if clean_code.isdigit() and len(clean_code) == 6:
+                stock_codes.append(clean_code)
+                name = candidate.get("name", "")
+                score = candidate.get("score", "")
+                logger.info(
+                    "[AlphaSift] 入选: %s %s  score=%s  rank=%s",
+                    clean_code, name, score, candidate.get("rank", ""),
+                )
+            if len(stock_codes) >= max_count:
+                break
+
+    logger.info("[AlphaSift] 选股完成，共 %d 只: %s", len(stock_codes), ",".join(stock_codes))
+    return stock_codes
+
+
+# ============================
 # 主入口
 # ============================
 def auto_screen_stocks(
@@ -837,33 +939,42 @@ def auto_screen_stocks(
     """
     执行自动选股，返回逗号分隔的股票代码字符串。
 
+    支持通过环境变量 SCREEN_METHOD 切换选股引擎：
+      - auto_screen（默认）：使用内置多数据源筛选策略
+      - alphasift：使用 AlphaSift 选股引擎（需 ALPHASIFT_ENABLED=true）
+      - alphasift_fallback：先 AlphaSift，失败则 fallback 到 auto_screen
+      - auto_screen_fallback：先 auto_screen，失败则 fallback 到 AlphaSift
+
     Args:
         max_count: 最多返回的股票数量
-        use_history: 是否拉取历史K线计算均线（精确但慢）
+        use_history: 是否拉取历史K线计算均线（精确但慢，仅 auto_screen 模式生效）
 
     Returns:
         逗号分隔的股票代码字符串，如 "600519,000001"；
         选股失败时返回空字符串，由调用方决定是否回退到默认配置。
     """
-    df = _fetch_realtime_with_fallback()
+    screen_method = os.environ.get("SCREEN_METHOD", "auto_screen").strip().lower()
+    logger.info("[选股] 选股引擎: %s", screen_method)
 
-    if df is None:
-        logger.error("无法获取行情数据，自动选股失败，将回退到默认 STOCK_LIST 配置")
-        logger.info("熔断器状态: %s", _circuit_breaker.get_status())
-        return ""
+    stock_code_list: List[str] = []
 
-    # 记录实际使用的数据源（通过列名特征判断）
-    source_detected = _detect_source(df)
-    logger.info("实际使用的数据源: %s", source_detected)
+    if screen_method == "alphasift":
+        stock_code_list = _screen_alphasift(max_count=max_count)
 
-    try:
-        if use_history:
-            stock_code_list = _screen_with_history(df, max_count=max_count)
-        else:
-            stock_code_list = _screen_quick(df, max_count=max_count)
-    except Exception as e:
-        logger.error("选股筛选过程出错: %s", e)
-        return ""
+    elif screen_method == "alphasift_fallback":
+        stock_code_list = _screen_alphasift(max_count=max_count)
+        if not stock_code_list:
+            logger.warning("[选股] AlphaSift 选股失败，fallback 到 auto_screen")
+            stock_code_list = _auto_screen_internal(max_count, use_history)
+
+    elif screen_method == "auto_screen_fallback":
+        stock_code_list = _auto_screen_internal(max_count, use_history)
+        if not stock_code_list:
+            logger.warning("[选股] auto_screen 选股失败，fallback 到 AlphaSift")
+            stock_code_list = _screen_alphasift(max_count=max_count)
+
+    else:  # auto_screen (默认)
+        stock_code_list = _auto_screen_internal(max_count, use_history)
 
     if not stock_code_list:
         logger.warning("未筛选到符合条件的股票，将使用默认股票池")
@@ -887,6 +998,36 @@ def auto_screen_stocks(
     return stock_str
 
 
+def _auto_screen_internal(max_count: int, use_history: bool) -> List[str]:
+    """
+    内置自动选股逻辑（多数据源 + 技术指标筛选）。
+
+    从 _fetch_realtime_with_fallback 拉取行情，然后根据 use_history
+    选择精确版（拉历史K线算均线）或快速版（仅用实时快照）筛选。
+    """
+    df = _fetch_realtime_with_fallback()
+
+    if df is None:
+        logger.error("无法获取行情数据，自动选股失败，将回退到默认 STOCK_LIST 配置")
+        logger.info("熔断器状态: %s", _circuit_breaker.get_status())
+        return []
+
+    # 记录实际使用的数据源（通过列名特征判断）
+    source_detected = _detect_source(df)
+    logger.info("实际使用的数据源: %s", source_detected)
+
+    try:
+        if use_history:
+            stock_code_list = _screen_with_history(df, max_count=max_count)
+        else:
+            stock_code_list = _screen_quick(df, max_count=max_count)
+    except Exception as e:
+        logger.error("选股筛选过程出错: %s", e)
+        return []
+
+    return stock_code_list
+
+
 def _detect_source(df: "pd.DataFrame") -> str:
     """通过列名特征判断数据来自哪个源（辅助调试）。"""
     cols = set(df.columns)
@@ -904,14 +1045,26 @@ def _detect_source(df: "pd.DataFrame") -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="A股自动选股（多数据源自动切换）")
+    parser = argparse.ArgumentParser(description="A股自动选股（支持 auto_screen / AlphaSift 切换）")
     parser.add_argument("--max", type=int, default=10, help="最多筛选的股票数量（默认 10）")
     parser.add_argument(
         "--use-history",
         action="store_true",
-        help="拉取历史K线精确计算均线（较慢，默认关闭）",
+        help="拉取历史K线精确计算均线（较慢，默认关闭，仅 auto_screen 模式生效）",
+    )
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="",
+        choices=["", "auto_screen", "alphasift", "alphasift_fallback", "auto_screen_fallback"],
+        help="选股引擎: auto_screen（默认）| alphasift | alphasift_fallback | auto_screen_fallback。"
+             "留空则读取环境变量 SCREEN_METHOD",
     )
     args = parser.parse_args()
+
+    # 命令行 --method 优先于环境变量 SCREEN_METHOD
+    if args.method:
+        os.environ["SCREEN_METHOD"] = args.method
 
     stock_str = auto_screen_stocks(max_count=args.max, use_history=args.use_history)
     if stock_str:
