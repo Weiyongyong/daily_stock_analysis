@@ -51,11 +51,34 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-           pip install akshare  # 自动选股行情库
+          pip install akshare  # 自动选股行情库
       
       - name: 创建必要目录
         run: |
           mkdir -p data logs reports
+
+      - name: 自动选股（筛选今日候选股池）
+        env:
+          AUTO_SCREEN_ENABLED: ${{ vars.AUTO_SCREEN_ENABLED || 'false' }}
+          AUTO_SCREEN_MAX: ${{ vars.AUTO_SCREEN_MAX || '10' }}
+          AUTO_SCREEN_USE_HISTORY: ${{ vars.AUTO_SCREEN_USE_HISTORY || 'false' }}
+        run: |
+          if [ "${AUTO_SCREEN_ENABLED}" = "true" ]; then
+            echo "🔍 自动选股已启用，开始筛选..."
+            USE_HIST_ARG=""
+            if [ "${AUTO_SCREEN_USE_HISTORY}" = "true" ]; then
+              USE_HIST_ARG="--use-history"
+            fi
+            python auto_screen.py --max "${AUTO_SCREEN_MAX}" $USE_HIST_ARG
+            # 读取 .auto_stock_env 并导出为环境变量供后续步骤使用
+            if [ -f ".auto_stock_env" ]; then
+              export $(grep -v '^#' .auto_stock_env | xargs)
+              echo "STOCK_LIST=$STOCK_LIST" >> $GITHUB_ENV
+              echo "📋 自动选股结果: $STOCK_LIST"
+            fi
+          else
+            echo "⚪ 自动选股未启用（设置 AUTO_SCREEN_ENABLED=true 开启），使用 STOCK_LIST 配置"
+          fi
       
       - name: 执行股票分析
         env:
@@ -461,9 +484,6 @@ jobs:
             FORCE_RUN_ARG="--force-run"
             echo "⚡ 已启用强制运行模式（跳过交易日检查）"
           fi
-
-          # 执行全市场自动筛选
-            # python auto_screen.py
 
           # 执行分析
           if [ "$MODE" = "market-only" ]; then
