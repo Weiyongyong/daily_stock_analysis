@@ -56,34 +56,77 @@ jobs:
         run: |
           mkdir -p data logs reports
 
-      # - name: 自动选股（筛选今日候选股池）
-      #   env:
-      #     AUTO_SCREEN_ENABLED: ${{ vars.AUTO_SCREEN_ENABLED || 'true' }}
-      #     AUTO_SCREEN_MAX: ${{ vars.AUTO_SCREEN_MAX || '5' }}
-      #     AUTO_SCREEN_USE_HISTORY: ${{ vars.AUTO_SCREEN_USE_HISTORY || 'false' }}
-      #   run: |
-      #     if [ "${AUTO_SCREEN_ENABLED}" = "true" ]; then
-      #       echo "🔍 自动选股已启用，开始筛选..."
-      #       USE_HIST_ARG=""
-      #       if [ "${AUTO_SCREEN_USE_HISTORY}" = "true" ]; then
-      #         USE_HIST_ARG="--use-history"
-      #       fi
-      #       python auto_screen.py --max "${AUTO_SCREEN_MAX}" $USE_HIST_ARG || echo "⚠️ 自动选股执行失败，将使用默认 STOCK_LIST"
-      #       # 读取 .auto_stock_env 并导出为环境变量供后续步骤使用
-      #       if [ -f ".auto_stock_env" ]; then
-      #         SCREENED_STOCKS=$(grep '^STOCK_LIST=' .auto_stock_env | cut -d'=' -f2-)
-      #         if [ -n "$SCREENED_STOCKS" ]; then
-      #           echo "STOCK_LIST=$SCREENED_STOCKS" >> $GITHUB_ENV
-      #           echo "📋 自动选股结果: $SCREENED_STOCKS"
-      #         else
-      #           echo "⚪ 选股结果为空，使用默认 STOCK_LIST 配置"
-      #         fi
-      #       else
-      #         echo "⚪ 未生成选股文件，使用默认 STOCK_LIST 配置"
-      #       fi
-      #     else
-      #       echo "⚪ 自动选股未启用（设置 AUTO_SCREEN_ENABLED=true 开启），使用 STOCK_LIST 配置"
-      #     fi
+      - name: 自动选股（筛选今日候选股池）
+        env:
+          AUTO_SCREEN_ENABLED: ${{ vars.AUTO_SCREEN_ENABLED || 'true' }}
+          AUTO_SCREEN_MAX: ${{ vars.AUTO_SCREEN_MAX || '10' }}
+          AUTO_SCREEN_USE_HISTORY: ${{ vars.AUTO_SCREEN_USE_HISTORY || 'false' }}
+          # ==========================================
+          # 选股引擎切换
+          # ==========================================
+          # auto_screen（默认）：内置多数据源筛选
+          # alphasift：AlphaSift 多因子+LLM 选股
+          # alphasift_fallback：先 AlphaSift，失败 fallback 到 auto_screen
+          # auto_screen_fallback：先 auto_screen，失败 fallback 到 AlphaSift
+          SCREEN_METHOD: ${{ vars.SCREEN_METHOD || 'alphasift_fallback' }}
+          # AlphaSift 配置（仅 SCREEN_METHOD 含 alphasift 时生效）
+          ALPHASIFT_ENABLED: ${{ vars.ALPHASIFT_ENABLED || 'true' }}
+          ALPHASIFT_STRATEGY: ${{ vars.ALPHASIFT_STRATEGY || 'dual_low' }}
+          ALPHASIFT_MARKET: ${{ vars.ALPHASIFT_MARKET || 'cn' }}
+          # AlphaSift 选股需要 LLM 配置（用于多因子+LLM排序）
+          # 以下变量与"执行股票分析"步骤保持一致
+          LITELLM_CONFIG: ${{ vars.LITELLM_CONFIG || secrets.LITELLM_CONFIG }}
+          LITELLM_CONFIG_YAML: ${{ vars.LITELLM_CONFIG_YAML || secrets.LITELLM_CONFIG_YAML }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
+          LITELLM_FALLBACK_MODELS: ${{ vars.LITELLM_FALLBACK_MODELS || secrets.LITELLM_FALLBACK_MODELS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
+          AIHUBMIX_KEY: ${{ secrets.AIHUBMIX_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEYS: ${{ secrets.OPENAI_API_KEYS }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_API_KEYS: ${{ secrets.DEEPSEEK_API_KEYS }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEYS: ${{ secrets.ANTHROPIC_API_KEYS }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || secrets.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022' }}
+          LLM_CHANNELS: ${{ vars.LLM_CHANNELS || secrets.LLM_CHANNELS }}
+          # AlphaSift 数据源相关
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
+        run: |
+          # 处理 LITELLM YAML 配置文件（AlphaSift 选股需要 LLM 配置）
+          if [ -n "$LITELLM_CONFIG_YAML" ] && [ -n "$LITELLM_CONFIG" ]; then
+            mkdir -p "$(dirname "$LITELLM_CONFIG")"
+            echo "$LITELLM_CONFIG_YAML" > "$LITELLM_CONFIG"
+          fi
+          if [ "${AUTO_SCREEN_ENABLED}" = "true" ]; then
+            echo "🔍 自动选股已启用，开始筛选..."
+            echo "🔧 选股引擎: ${SCREEN_METHOD}"
+            USE_HIST_ARG=""
+            if [ "${AUTO_SCREEN_USE_HISTORY}" = "true" ]; then
+              USE_HIST_ARG="--use-history"
+            fi
+            python auto_screen.py --max "${AUTO_SCREEN_MAX}" $USE_HIST_ARG || echo "⚠️ 自动选股执行失败，将使用默认 STOCK_LIST"
+            # 读取 .auto_stock_env 并导出为环境变量供后续步骤使用
+            if [ -f ".auto_stock_env" ]; then
+              SCREENED_STOCKS=$(grep '^STOCK_LIST=' .auto_stock_env | cut -d'=' -f2-)
+              if [ -n "$SCREENED_STOCKS" ]; then
+                echo "STOCK_LIST=$SCREENED_STOCKS" >> $GITHUB_ENV
+                echo "📋 自动选股结果: $SCREENED_STOCKS"
+              else
+                echo "⚪ 选股结果为空，使用默认 STOCK_LIST 配置"
+              fi
+            else
+              echo "⚪ 未生成选股文件，使用默认 STOCK_LIST 配置"
+            fi
+          else
+            echo "⚪ 自动选股未启用（设置 AUTO_SCREEN_ENABLED=true 开启），使用 STOCK_LIST 配置"
+          fi
       
       - name: 执行股票分析
         env:
