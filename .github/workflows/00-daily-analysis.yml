@@ -376,7 +376,9 @@ jobs:
           # ==========================================
           # 自选股配置
           # ==========================================
-          STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST || '600519' }}
+          # 优先使用自动选股结果（由前置步骤写入 $GITHUB_ENV），
+          # 其次使用仓库 Variables/Secrets 配置，最后回退默认值
+          STOCK_LIST: ${{ env.STOCK_LIST || vars.STOCK_LIST || secrets.STOCK_LIST || '600519' }}
           MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'cn' }}
           MARKET_REVIEW_COLOR_SCHEME: ${{ vars.MARKET_REVIEW_COLOR_SCHEME || secrets.MARKET_REVIEW_COLOR_SCHEME || 'green_up' }}
           
