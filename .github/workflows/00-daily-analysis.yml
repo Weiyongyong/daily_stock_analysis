@@ -71,7 +71,7 @@ jobs:
           SCREEN_METHOD: ${{ vars.SCREEN_METHOD || 'alphasift_fallback' }}
           # AlphaSift 配置（仅 SCREEN_METHOD 含 alphasift 时生效）
           ALPHASIFT_ENABLED: ${{ vars.ALPHASIFT_ENABLED || 'true' }}
-          ALPHASIFT_STRATEGY: ${{ vars.ALPHASIFT_STRATEGY || 'growth' }}
+          ALPHASIFT_STRATEGY: ${{ vars.ALPHASIFT_STRATEGY || 'momentum_quality' }}
           ALPHASIFT_MARKET: ${{ vars.ALPHASIFT_MARKET || 'cn' }}
           # AlphaSift 选股需要 LLM 配置（用于多因子+LLM排序）
           # 以下变量与"执行股票分析"步骤保持一致
