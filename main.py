@@ -21,23 +21,6 @@ A股自选股智能分析系统 - 主调度程序
 - 效率优先：关注筹码集中度好的股票
 - 买点偏好：缩量回踩 MA5/MA10 支撑
 """
-# 读取自动选股脚本生成的股票池（auto_screen.py 写入 .auto_stock_env）
-# 仅当环境变量 STOCK_LIST 未被显式设置时才从文件读取，避免覆盖命令行/env 优先级
-import os as _os_module
-import sys as _sys_module
-if not _os_module.getenv("STOCK_LIST"):
-    _auto_env_path = _os_module.path.join(_os_module.path.dirname(_os_module.path.abspath(__file__)), ".auto_stock_env")
-    if _os_module.path.exists(_auto_env_path):
-        try:
-            with open(_auto_env_path, "r", encoding="utf-8") as _f:
-                _line = _f.read().strip()
-                if _line.startswith("STOCK_LIST="):
-                    _os_module.environ["STOCK_LIST"] = _line.split("=", 1)[1]
-                    print(f"[auto_screen] 已从 .auto_stock_env 读取选股结果: {_os_module.environ['STOCK_LIST']}")
-        except Exception as _e:
-            print(f"[auto_screen] 读取 .auto_stock_env 失败: {_e}", file=_sys_module.stderr)
-del _os_module, _sys_module
-
 # 下面保留main.py原有全部代码，无需改动
 from __future__ import annotations
 
@@ -48,6 +31,20 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from dotenv import dotenv_values
 from src.config import setup_env
+
+# 读取自动选股脚本生成的股票池（auto_screen.py 写入 .auto_stock_env）
+# 仅当环境变量 STOCK_LIST 未被显式设置时才从文件读取，避免覆盖命令行/env 优先级
+if not os.getenv("STOCK_LIST"):
+    _auto_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".auto_stock_env")
+    if os.path.exists(_auto_env_path):
+        try:
+            with open(_auto_env_path, "r", encoding="utf-8") as _f:
+                _line = _f.read().strip()
+                if _line.startswith("STOCK_LIST="):
+                    os.environ["STOCK_LIST"] = _line.split("=", 1)[1]
+                    print(f"[auto_screen] 已从 .auto_stock_env 读取选股结果: {os.environ['STOCK_LIST']}")
+        except Exception as _e:
+            print(f"[auto_screen] 读取 .auto_stock_env 失败: {_e}", file=sys.stderr)
 
 _INITIAL_PROCESS_ENV = dict(os.environ)
 setup_env()
